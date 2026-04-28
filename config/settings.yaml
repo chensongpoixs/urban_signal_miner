@@ -6,13 +6,16 @@ project:
 
 # AI 模型配置
 model:
-  - name: "DeepSeekV4"
-    base_url: "http://192.168.3.2:20901"                    # OpenAI 兼容端点
-    base_url_anthropic: "http://192.168.3.2:20901"         # Anthropic 兼容端点（不加 /anthropic 后缀，SDK 自动拼 /v1/messages）
+  - name: "Gemma-4-Pro"  # 模型名称（用于日志和数据库记录）
+    # base_url: "http://192.168.3.2:20901"                    # OpenAI 兼容端点
+    # base_url_anthropic: "http://192.168.3.2:20901"         # Anthropic 兼容端点（不加 /anthropic 后缀，SDK 自动拼 /v1/messages）
+    base_url: "http://192.168.3.2:11434"                    # Anthropic 官方端点
+    base_url_anthropic: "http://192.168.3.2:11434"
     api_key: "{ANTHROPIC_API_KEY}"                             # 留空则从环境变量 ANTHROPIC_API_KEY 读取
-    model: "deepseek-v4-pro"
-    timeout: 300
-    max_retries: 3
+    # model: "deepseek-v4-pro"
+    model: "gemma-4-26B-A4B-it-Q4_K_M" # 2024-06-10 发布的最新模型，性能大幅提升
+    timeout: 15000  # 请求超时时间（毫秒）
+    max_retries: 3 # 请求失败重试次数
 
 # 去重配置
 dedup:
@@ -27,14 +30,14 @@ source_strategy:
 
 # 数据库配置 — 二选一: sqlite 或 mysql
 database:
-  # type: "sqlite"  # sqlite | mysql
-  # sqlite:
-  #   path: "db/news.db"
+  type: "mysql"  # sqlite | mysql
+  sqlite:
+    path: "db/news.db"
   mysql:
-    host: "127.0.0.1"
+    host: "localhost"
     port: 3306
     user: "root"
-    password: "{MYSQL_PASSWORD}"          # 留空则从环境变量 MYSQL_PASSWORD 读取
+    password: ""          # 留空则从环境变量 MYSQL_PASSWORD 读取
     database: "daily_news"
     charset: "utf8mb4"
 

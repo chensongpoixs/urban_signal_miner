@@ -98,7 +98,8 @@ class _DB:
         self._text_type = "TEXT"
         self._json_type = "JSON"
         self._bool_type = "TINYINT(1)"
-        logger.info("MySQL 已连接: %s", _mask_url(f"mysql://{user}@***@{host}:{port}/{database}"))
+        #logger.info("MySQL 已连接: %s", _mask_url(f"mysql://{user}@***@{host}:{port}/{database}"))
+        logger.info("MySQL 已连接: %s", f"mysql://{user}@{password}@{host}:{port}/{database}");
 
     # ── 通用接口 ──
 
@@ -211,9 +212,10 @@ def init_db():
             );
         """)
     else:
-        # MySQL
+        # MySQL --- DROP TABLE IF EXISTS news_index; CREATE TABLE news_index (...)
         db.executescript("""
-            CREATE TABLE IF NOT EXISTS news_index (
+             CREATE TABLE  IF NOT EXISTS news_index (
+            
                 id VARCHAR(64) PRIMARY KEY,
                 date DATE NOT NULL,
                 source VARCHAR(32) NOT NULL,
@@ -234,13 +236,14 @@ def init_db():
                 INDEX idx_news_date (date),
                 INDEX idx_news_source (source),
                 INDEX idx_news_importance (importance),
-                FULLTEXT INDEX news_fts (title, ai_summary, tags)
-            );
+                FULLTEXT INDEX news_fts (title, ai_summary)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-            CREATE TABLE IF NOT EXISTS processed_files (
+            DROP TABLE IF EXISTS processed_files;
+            CREATE TABLE processed_files (
                 file_path VARCHAR(512) PRIMARY KEY,
                 processed_at DATETIME
-            );
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
             CREATE TABLE IF NOT EXISTS reports_index (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -250,7 +253,7 @@ def init_db():
                 news_count INT,
                 key_findings JSON,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """)
 
     logger.info("数据库表初始化完成 [%s]", db.type)
@@ -302,7 +305,7 @@ def search_news(
         base = "SELECT ni.* FROM news_index ni JOIN news_fts nf ON ni.rowid = nf.rowid WHERE news_fts MATCH ?"
         params: List[Any] = [keyword]
     elif keyword and db.type == "mysql":
-        base = "SELECT * FROM news_index WHERE MATCH(title, ai_summary, tags) AGAINST(%s IN BOOLEAN MODE)"
+        base = "SELECT * FROM news_index WHERE MATCH(title, ai_summary) AGAINST(%s IN BOOLEAN MODE)"
         params = [keyword]
     else:
         base = "SELECT * FROM news_index WHERE 1=1"
