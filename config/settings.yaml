@@ -1,0 +1,44 @@
+# 全局配置
+project:
+  name: "daily_news_analysis"
+  news_dir: "news-corpus"          # ModelScope 仓库本地路径
+  logs_dir: "logs"
+
+# AI 模型配置
+model:
+  - name: "DeepSeekV4"
+    base_url: "http://192.168.3.2:20901"                    # OpenAI 兼容端点
+    base_url_anthropic: "http://192.168.3.2:20901"         # Anthropic 兼容端点（不加 /anthropic 后缀，SDK 自动拼 /v1/messages）
+    api_key: "{ANTHROPIC_API_KEY}"                             # 留空则从环境变量 ANTHROPIC_API_KEY 读取
+    model: "deepseek-v4-pro"
+    timeout: 300
+    max_retries: 3
+
+# 去重配置
+dedup:
+  title_similarity_threshold: 0.8  # 标题相似度超过此值视为重复
+
+# 新闻处理策略（哪些来源需要全量/部分处理）
+source_strategy:
+  full_process: ["cls-hot", "wallstreetcn-hot", "thepaper"]
+  selective_process: ["toutiao", "zhihu", "ifeng"]
+  top_only: ["weibo", "baidu", "bilibili-hot-search", "douyin", "tieba"]
+  top_n: 20  # top_only 来源只处理前 N 条
+
+# 数据库配置 — 二选一: sqlite 或 mysql
+database:
+  # type: "sqlite"  # sqlite | mysql
+  # sqlite:
+  #   path: "db/news.db"
+  mysql:
+    host: "127.0.0.1"
+    port: 3306
+    user: "root"
+    password: "{MYSQL_PASSWORD}"          # 留空则从环境变量 MYSQL_PASSWORD 读取
+    database: "daily_news"
+    charset: "utf8mb4"
+
+# 每日预估
+daily:
+  total_files: 600
+  processed: 150  # 经过去重和过滤后的实际打标数
