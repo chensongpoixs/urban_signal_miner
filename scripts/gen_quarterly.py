@@ -14,24 +14,16 @@
 使用 Claude Opus 分块处理，避免 token 超限。
 """
 import sys
-import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.db import init_db, search_news, get_source_stats
+from utils.db import init_db, search_news, get_source_stats, insert_report, extract_key_findings
 from utils.config_loader import get_cities
-from utils.llm_client import chat
+from utils.llm_client import chat_safe, chat
+from utils.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(Path(__file__).parent.parent / "logs" / "quarterly.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging("quarterly", "quarterly.log")
 
 PROJECT_DIR = Path(__file__).parent.parent
 REPORTS_DIR = PROJECT_DIR / "reports" / "quarterly"
@@ -98,7 +90,7 @@ def build_timeline(news: list) -> str:
 
 def run_phase1_summary(timeline: str) -> str:
     """阶段1：按领域分组摘要。Sonnet 预提炼各领域关键事件。"""
-    logger.info("阶段1: 按领域分组摘要")
+    logger.info("Phase 1: domain summary")
 
     system = """你是专业新闻分析师。下面是一个季度的新闻时间轴。
 请按领域分别总结本季度各领域的关键事件和发展趋势。
@@ -112,17 +104,17 @@ def run_phase1_summary(timeline: str) -> str:
 
 输出简洁，每个领域控制在 500 字以内。"""
 
-    summary = chat(
+    summary = chat_safe(
         system,
         [{"role": "user", "content": f"季度新闻时间轴：\n\n{timeline[:15000]}"}],
-        max_tokens=4096,
+        model_key="fast", max_tokens=4096,
     )
     return summary
 
 
 def run_phase2_deep_analysis(timeline: str, phase1_summary: str) -> str:
     """阶段2：深度分析 — 因果链 + 底层规律 + 机会地图。用 Opus。"""
-    logger.info("阶段2: Opus 深度分析")
+    logger.info("Phase 2: deep analysis")
 
     cities_config = get_cities()
     city_info = "\n".join(
@@ -218,11 +210,10 @@ def run_phase2_deep_analysis(timeline: str, phase1_summary: str) -> str:
 
 请按照指定的报告结构输出完整的季度深度分析报告。"""
 
-    report = chat(
+    report = chat_safe(
         system,
         [{"role": "user", "content": prompt}],
-        model=None,  # 使用 settings.yaml 中配置的模型
-        max_tokens=8192,
+        model_key="deep", max_tokens=8192,
     )
     return report
 
@@ -230,24 +221,30 @@ def run_phase2_deep_analysis(timeline: str, phase1_summary: str) -> str:
 def generate_quarterly(offset: int = 0):
     """生成季度深度报告。offset=0 为当前季度，-1 为上一季度。"""
     quarter_key, start, end = get_quarter_range(offset)
-    logger.info("生成季度报告: %s (%s ~ %s)", quarter_key, start, end)
+    logger.info("Generating quarterly report: %s (%s ~ %s)", quarter_key, start, end)
 
     init_db()
     news = gather_quarterly_news(start, end)
-    logger.info("检索到 %d 条新闻", len(news))
+    logger.info("Found %d news items", len(news))
 
     if len(news) < 20:
-        logger.warning("季度新闻数量不足（%d条），分析质量可能受影响", len(news))
+        logger.warning("Insufficient news (%d items), analysis quality may be affected", len(news))
 
     # 构建时间轴
     timeline = build_timeline(news)
 
     # 阶段1：领域摘要
-    phase1_summary = run_phase1_summary(timeline)
+    try:
+        phase1_summary = run_phase1_summary(timeline)
+    except Exception as e:
+        logger.warning("Phase 1 (domain summary) failed, degraded to direct deep analysis: %s", e)
+        phase1_summary = ""
 
     # 阶段2：深度分析
     report = run_phase2_deep_analysis(timeline, phase1_summary)
 
+    # 分析质量标注
+    degraded = "（含领域摘要）" if phase1_summary else "（降级：跳过领域摘要）"
     # 保存
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = REPORTS_DIR / f"{quarter_key}-deep-analysis.md"
@@ -256,12 +253,19 @@ def generate_quarterly(offset: int = 0):
 **周期**: {start} ~ {end}
 **生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 **新闻数量**: {len(news)} 条
-**分析方法**: 两阶段分析（Sonnet 领域摘要 + Opus 深度推理）
+**分析方法**: 两阶段分析 {degraded}
 
 ---
 """
     output_path.write_text(header + report, encoding="utf-8")
-    logger.info("季度报告已保存: %s", output_path)
+    logger.info("Quarterly report saved: %s", output_path)
+
+    # 写入报告索引
+    relative_path = str(output_path.relative_to(PROJECT_DIR))
+    insert_report("quarterly", quarter_key, relative_path, news_count=len(news),
+                  key_findings=extract_key_findings(report))
+    logger.info("Report index updated")
+
     return str(output_path)
 
 
@@ -269,7 +273,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="生成季度深度分析报告")
     parser.add_argument("--offset", type=int, default=0,
-                        help="季度偏移: 0=当前季度, -1=上一季度")
+                        help="Quarter offset: 0=current quarter, -1=previous")
     args = parser.parse_args()
     path = generate_quarterly(offset=args.offset)
-    print(f"\n季度深度报告已生成: {path}")
+    print(f"\nQuarterly deep report generated: {path}")

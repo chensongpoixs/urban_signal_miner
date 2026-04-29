@@ -15,28 +15,20 @@ AI 新闻分类/打标脚本。
 import sys
 import re
 import json
-import logging
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-from difflib import SequenceMatcher
-
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.config_loader import get_source_weights, get_cities, get_domains
+from utils.config_loader import get_source_weights, get_cities, get_domains, get_city_keywords, get_settings
 from utils.llm_client import chat_structured
 from utils.db import init_db, insert_news, mark_file_processed, is_file_processed
+from utils.file_utils import get_unenhanced_files
+from utils.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(Path(__file__).parent.parent / "logs" / "classify.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging("classify", "classify.log")
 
 PROJECT_DIR = Path(__file__).parent.parent
 NEWS_DIR = PROJECT_DIR / "news-corpus"
@@ -67,14 +59,52 @@ class NewsClassification(BaseModel):
     quality_pass: bool = Field(default=True,
         description="是否通过质量筛选（纯广告/纯八卦/无实质内容=不通过）")
 
+# ── 去重 & 预筛 ────────────────────────────────────────
+
+def check_title_similarity(title: str, date_str: str) -> bool:
+    """检查标题与数据库中同日期已有新闻的相似度。返回 True 表示重复。"""
+    from difflib import SequenceMatcher
+    from utils.db import search_news
+
+    threshold = get_settings().get("dedup", {}).get("title_similarity_threshold", 0.8)
+    if not title:
+        return False
+
+    existing = search_news(date_from=date_str, date_to=date_str, limit=200)
+    for item in existing:
+        existing_title = item.get("title", "")
+        if not existing_title:
+            continue
+        ratio = SequenceMatcher(None, title, existing_title).ratio()
+        if ratio >= threshold:
+            logger.info("Title dup(%.2f): %s ~ %s", ratio, title[:40], existing_title[:40])
+            return True
+    return False
+
+
+def prefilter_cities(title: str, body: str) -> list[str]:
+    """用关键词预筛城市，返回可能相关的城市列表。缩小 LLM 候选范围。"""
+    from utils.config_loader import get_city_keywords
+
+    text = f"{title} {body}"
+    city_keywords = get_city_keywords()
+    matched = []
+    for city_name, keywords in city_keywords.items():
+        for kw in keywords:
+            if kw in text:
+                matched.append(city_name)
+                break
+    return matched
+
+
 # ── 解析原始 Markdown ──────────────────────────────────
 
-def parse_raw_md(filepath: Path) -> Optional[dict]:
+def parse_raw_md(filepath: Path, body_chars: int = 3000) -> Optional[dict]:
     """解析原始 Markdown 文件，提取元数据和正文。"""
     try:
         content = filepath.read_text(encoding="utf-8")
     except Exception as e:
-        logger.warning("无法读取文件 %s: %s", filepath.name, e)
+        logger.warning("Cannot read file %s: %s", filepath.name, e)
         return None
 
     # 如果已有 frontmatter，跳过
@@ -122,9 +152,9 @@ def parse_raw_md(filepath: Path) -> Optional[dict]:
             body_lines.append(line)
 
     body = "\n".join(body_lines).strip()
-    # 截断过长正文（保留前 3000 字）
-    if len(body) > 3000:
-        body = body[:3000] + "..."
+    # 截断过长正文
+    if len(body) > body_chars:
+        body = body[:body_chars] + "..."
 
     return {
         "title": title,
@@ -261,7 +291,7 @@ ai_why_matters: "{safe_why}"
         original = filepath.read_text(encoding="utf-8")
         new_content = frontmatter + original.lstrip("\n")
         filepath.write_text(new_content, encoding="utf-8")
-        logger.info("增强完成: %s [重要性=%d] %s", id_str, result.importance, result.domain)
+        logger.info("Enhanced: %s [importance=%d] %s", id_str, result.importance, result.domain)
 
         # 写入 SQLite 索引
         rel_path = str(filepath.relative_to(NEWS_DIR))
@@ -284,30 +314,39 @@ ai_why_matters: "{safe_why}"
             "word_count": article.get("word_count", 0),
         })
     except Exception as e:
-        logger.error("增强失败 %s: %s", filepath.name, e)
+        logger.error("Enhance failed %s: %s", filepath.name, e)
 
 
 # ── 主处理流程 ──────────────────────────────────────────
 
 def process_files(filepaths: list[Path], dry_run: bool = False):
-    """处理文件列表，增强每个文件。"""
-    # 过滤已处理的
+    """处理文件列表，增强每个文件。支持断点续跑（跳过已处理文件）。"""
+    settings = get_settings()
+
+    # 过滤已处理的（断点续跑）
     str_paths = [str(p.relative_to(NEWS_DIR)) for p in filepaths]
     unprocessed = []
+    skipped_count = 0
     for p, sp in zip(filepaths, str_paths):
         if not is_file_processed(sp):
             unprocessed.append(p)
+        else:
+            skipped_count += 1
 
-    logger.info("共 %d 个文件，%d 个待处理", len(filepaths), len(unprocessed))
+    if skipped_count > 0:
+        logger.info("Checkpoint resume: %d files already processed, skipping", skipped_count)
+    logger.info("Total %d files, %d pending", len(filepaths), len(unprocessed))
 
     if dry_run:
-        logger.info("[DRY RUN] 将处理以下文件（前50个）:")
+        logger.info("[DRY RUN] Will process the following files (first 50):")
         for p in unprocessed[:50]:
             logger.info("  %s", p.relative_to(NEWS_DIR))
         return
 
-    # 分批处理（每次最多30条）
-    batch_size = 30
+    # 可配置参数
+    batch_size = settings.get("llm_limits", {}).get("classify_batch_size", 30)
+    interval = settings.get("llm_limits", {}).get("classify_interval_seconds", 1)
+    body_chars = settings.get("llm_limits", {}).get("classify_body_chars", 3000)
     total = len(unprocessed)
 
     from tqdm import tqdm
@@ -321,7 +360,7 @@ def process_files(filepaths: list[Path], dry_run: bool = False):
         # 解析所有文件
         articles = []
         for fp in batch:
-            article = parse_raw_md(fp)
+            article = parse_raw_md(fp, body_chars=body_chars)
             if article:
                 articles.append(article)
 
@@ -338,12 +377,28 @@ def process_files(filepaths: list[Path], dry_run: bool = False):
         # 逐条调用
         for article in articles:
             try:
+                date_str = extract_date_from_path(article["filepath"])
+                title = article["title"]
+
+                # B2: 标题相似度预筛
+                if check_title_similarity(title, date_str):
+                    rel = article["filepath"].relative_to(NEWS_DIR)
+                    mark_file_processed(str(rel))
+                    tqdm.write(f"⊘ Dup: {title[:50]}")
+                    pbar.update(1)
+                    continue
+
+                # B3: 城市关键词预筛，注入 prompt
+                city_hints = prefilter_cities(title, article.get("body", ""))
                 prompt = build_classify_prompt(article)
+                if city_hints:
+                    prompt += f"\n\n提示：以下城市的关键词在文中出现，请重点关注: {', '.join(city_hints)}"
+
                 result = chat_structured(system, prompt, NewsClassification)
 
                 if result.is_duplicate or not result.quality_pass:
                     rel = article["filepath"].relative_to(NEWS_DIR)
-                    tqdm.write(f"⊘ 跳过: {rel.name[:50]} (重复或低质量)")
+                    tqdm.write(f"⊘ Skip: {rel.name[:50]} (dup/low quality)")
                     mark_file_processed(str(rel))
                     pbar.update(1)
                     continue
@@ -351,11 +406,16 @@ def process_files(filepaths: list[Path], dry_run: bool = False):
                 enhance_file(article["filepath"], result, article)
                 mark_file_processed(str(article["filepath"].relative_to(NEWS_DIR)))
                 pbar.update(1)
-                tqdm.write(f"✓ ★{result.importance} {article['title'][:60]}")
+                tqdm.write(f"OK ★{result.importance} {title[:60]}")
 
             except Exception as e:
-                logger.error("处理失败 %s: %s", article["filepath"].name, e)
+                logger.error("Classify failed %s: %s", article["filepath"].name, e)
+                # 不标记为已处理，下次重试（断点续跑）
                 pbar.update(1)
+
+            # API 速率限制
+            if interval > 0:
+                time.sleep(interval)
 
     pbar.close()
 
@@ -363,9 +423,9 @@ def process_files(filepaths: list[Path], dry_run: bool = False):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="AI 新闻分类增强")
-    parser.add_argument("--dry-run", action="store_true", help="预览模式，不实际修改文件")
-    parser.add_argument("--files", nargs="*", help="指定文件列表（可选，不指定则扫描全部未处理文件）")
-    parser.add_argument("--limit", type=int, default=0, help="限制处理数量（测试用）")
+    parser.add_argument("--dry-run", action="store_true", help="Preview mode, no file modification")
+    parser.add_argument("--files", nargs="*", help="Specific files (optional, scan all if omitted)")
+    parser.add_argument("--limit", type=int, default=0, help="Max files to process (for testing)")
     args = parser.parse_args()
 
     init_db()
@@ -373,24 +433,14 @@ if __name__ == "__main__":
     if args.files:
         filepaths = [Path(f) for f in args.files]
     else:
-        # 扫描所有未增强的文件
-        filepaths = []
-        for date_dir in sorted(NEWS_DIR.iterdir()):
-            if not date_dir.is_dir() or not date_dir.name.isdigit():
-                continue
-            for source_dir in sorted(date_dir.iterdir()):
-                if not source_dir.is_dir():
-                    continue
-                for md_file in sorted(source_dir.glob("*.md")):
-                    if not md_file.name.startswith("."):
-                        filepaths.append(md_file)
+        filepaths = get_unenhanced_files(NEWS_DIR)
 
     if args.limit > 0:
         filepaths = filepaths[:args.limit]
 
     logger.info("=" * 50)
-    logger.info("新闻分类增强开始")
-    logger.info("待扫描文件: %d", len(filepaths))
+    logger.info("News classify started")
+    logger.info("Files to scan: %d", len(filepaths))
 
     process_files(filepaths, dry_run=args.dry_run)
-    logger.info("新闻分类增强完成")
+    logger.info("News classify completed")

@@ -60,7 +60,7 @@ class _DB:
         self._text_type = "TEXT"
         self._json_type = "TEXT"
         self._bool_type = "INTEGER"
-        logger.info("SQLite 已连接: %s", db_path)
+        logger.info("SQLite connected: %s", db_path)
 
     # ── MySQL ──
 
@@ -68,7 +68,7 @@ class _DB:
         try:
             import pymysql
         except ImportError:
-            logger.error("缺少 pymysql 库。安装: pip install pymysql")
+            logger.error("pymysql not found. Install: pip install pymysql")
             sys.exit(1)
 
         host = cfg.get("host", "127.0.0.1")
@@ -89,17 +89,18 @@ class _DB:
             )
         tmp_conn.close()
 
+        self._mysql_config = (host, port, user, password, database, charset)
         self._conn = pymysql.connect(
             host=host, port=port, user=user, password=password,
             database=database, charset=charset,
+            autocommit=True, connect_timeout=10, read_timeout=30,
         )
         self._placeholder = "%s"
         self._auto_inc = "INT AUTO_INCREMENT PRIMARY KEY"
         self._text_type = "TEXT"
         self._json_type = "JSON"
         self._bool_type = "TINYINT(1)"
-        #logger.info("MySQL 已连接: %s", _mask_url(f"mysql://{user}@***@{host}:{port}/{database}"))
-        logger.info("MySQL 已连接: %s", f"mysql://{user}@{password}@{host}:{port}/{database}");
+        logger.info("MySQL connected: %s", _mask_url(f"mysql://{user}@***@{host}:{port}/{database}"))
 
     # ── 通用接口 ──
 
@@ -107,8 +108,25 @@ class _DB:
     def type(self) -> str:
         return self._type
 
+    def _ping(self):
+        """Check connection health, reconnect if needed (MySQL only)."""
+        if self._type != "mysql":
+            return
+        try:
+            self._conn.ping(reconnect=True)
+        except Exception as e:
+            logger.warning("MySQL connection lost, reconnecting: %s", e)
+            import pymysql
+            host, port, user, password, database, charset = self._mysql_config
+            self._conn = pymysql.connect(
+                host=host, port=port, user=user, password=password,
+                database=database, charset=charset,
+                autocommit=True, connect_timeout=10, read_timeout=30,
+            )
+
     def execute(self, sql: str, params=None):
-        """执行 SQL，自动转换占位符。"""
+        """执行 SQL，自动转换占位符。MySQL 连接断开时自动重连。"""
+        self._ping()
         if params is None:
             params = []
         sql = sql.replace("?", self._placeholder)
@@ -256,11 +274,27 @@ def init_db():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """)
 
-    logger.info("数据库表初始化完成 [%s]", db.type)
+    logger.info("Database tables initialized [%s]", db.type)
 
 
 def insert_news(record: Dict[str, Any]):
-    """插入或替换一条新闻索引记录。"""
+    """插入或替换一条新闻索引记录。校验必填字段。"""
+    # 数据校验
+    import re
+    news_id = record.get("id", "")
+    title = record.get("title", "")
+    date = record.get("date", "")
+    importance = record.get("importance", 0)
+
+    if not news_id:
+        raise ValueError("insert_news: id is required")
+    if not title:
+        raise ValueError("insert_news: title is required")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(date)):
+        raise ValueError(f"insert_news: invalid date format '{date}', expected YYYY-MM-DD")
+    if not (1 <= importance <= 5):
+        raise ValueError(f"insert_news: importance out of range {importance}, expected 1-5")
+
     db = get_db()
     sql = f"""
         REPLACE INTO news_index
@@ -409,13 +443,17 @@ def get_source_stats(date_from: str, date_to: str) -> List[Dict]:
 
 
 def mark_file_processed(file_path: str):
-    db = get_db()
-    from datetime import datetime
-    db.execute(
-        "REPLACE INTO processed_files VALUES (?, ?)",
-        (file_path, datetime.now().isoformat()),
-    )
-    db.commit()
+    """标记文件已处理，静默处理数据库写入失败。"""
+    try:
+        db = get_db()
+        from datetime import datetime
+        db.execute(
+            "REPLACE INTO processed_files VALUES (?, ?)",
+            (file_path, datetime.now().isoformat()),
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning("Mark file processed failed %s: %s", file_path, e)
 
 
 def is_file_processed(file_path: str) -> bool:
@@ -433,3 +471,32 @@ def get_unprocessed_files(all_paths: List[str]) -> List[str]:
     )
     processed = {r[0] if isinstance(r, (tuple, list)) else r["file_path"] for r in cur.fetchall()}
     return [p for p in all_paths if p not in processed]
+
+
+def extract_key_findings(report_text: str, max_chars: int = 500) -> str:
+    """Extract first substantive paragraph from report text for index."""
+    # Skip header lines (starting with #) and blank lines
+    lines = report_text.split("\n")
+    body = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("---"):
+            if body:  # stop at first blank/header after body
+                break
+            continue
+        body.append(stripped)
+        if sum(len(l) for l in body) >= max_chars:
+            break
+    return " ".join(body)[:max_chars]
+
+
+def insert_report(report_type: str, period_key: str, file_path: str, news_count: int = 0, key_findings: str = ""):
+    """插入一条报告索引记录。"""
+    db = get_db()
+    from datetime import datetime
+    sql = f"""
+        INSERT INTO reports_index (report_type, period_key, file_path, news_count, key_findings, created_at)
+        VALUES ({",".join(["?"] * 6)})
+    """
+    db.execute(sql, (report_type, period_key, file_path, news_count, key_findings, datetime.now().isoformat()))
+    db.commit()

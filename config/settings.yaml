@@ -6,27 +6,38 @@ project:
 
 # AI 模型配置
 model:
-  - name: "Gemma-4-Pro"  # 模型名称（用于日志和数据库记录）
-    # base_url: "http://192.168.3.2:20901"                    # OpenAI 兼容端点
-    # base_url_anthropic: "http://192.168.3.2:20901"         # Anthropic 兼容端点（不加 /anthropic 后缀，SDK 自动拼 /v1/messages）
-    base_url: "http://192.168.3.2:11434"                    # Anthropic 官方端点
+  - name: "Local-Fast"           # Fast model for classify/simple tasks
+    role: "fast"                 # Used by: classify.py, gen_weekly, gen_monthly, phase1
+    base_url: "http://192.168.3.2:11434"
     base_url_anthropic: "http://192.168.3.2:11434"
-    api_key: "{ANTHROPIC_API_KEY}"                             # 留空则从环境变量 ANTHROPIC_API_KEY 读取
-    # model: "deepseek-v4-pro"
-    model: "gemma-4-26B-A4B-it-Q4_K_M" # 2024-06-10 发布的最新模型，性能大幅提升
-    timeout: 15000  # 请求超时时间（毫秒）
-    max_retries: 3 # 请求失败重试次数
+    api_key: ""                  # Empty = read from ANTHROPIC_API_KEY env var
+    model: "gemma-4-26B-A4B-it-Q4_K_M"
+    timeout: 15000
+    max_retries: 1
+
+  - name: "Local-Deep"           # Deep model for quarterly/deep analysis
+    role: "deep"                 # Used by: gen_quarterly phase2, gen_causal_chain
+    base_url: "http://192.168.3.2:11434"
+    base_url_anthropic: "http://192.168.3.2:11434"
+    api_key: ""
+    model: "gemma-4-26B-A4B-it-Q4_K_M"
+    timeout: 30000
+    max_retries: 1
+
+# 报告生成 token 限制
+llm_limits:
+  classify_max_tokens: 2048      # classify.py 结构化输出
+  classify_batch_size: 30        # 每批处理新闻数
+  classify_interval_seconds: 1   # API 调用间隔（秒），避免限流
+  classify_body_chars: 3000      # 正文截断字符数
+  weekly_max_tokens: 4096        # 周报
+  monthly_max_tokens: 8192       # 月报
+  quarterly_max_tokens: 8192     # 季度深度报告
+  special_max_tokens: 4096       # 专题分析（城市对比/因果链）
 
 # 去重配置
 dedup:
   title_similarity_threshold: 0.8  # 标题相似度超过此值视为重复
-
-# 新闻处理策略（哪些来源需要全量/部分处理）
-source_strategy:
-  full_process: ["cls-hot", "wallstreetcn-hot", "thepaper"]
-  selective_process: ["toutiao", "zhihu", "ifeng"]
-  top_only: ["weibo", "baidu", "bilibili-hot-search", "douyin", "tieba"]
-  top_n: 20  # top_only 来源只处理前 N 条
 
 # 数据库配置 — 二选一: sqlite 或 mysql
 database:

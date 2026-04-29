@@ -1,4 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 环境变量
+.env
+
+# 数据库
 /db
-/news-corpus
-/scripts/utils/__pycache__
+
+# 日志
 /logs
+
+# 生成的报告
+/reports
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 新闻语料（从 ModelScope git clone，不需要提交）
+/news-corpus

@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """城市对比分析 — 6城市差异化定位+竞争力雷达+人才资本流向。"""
 import sys
-import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.db import init_db, search_news
+from utils.db import init_db, search_news, insert_report, extract_key_findings
 from utils.config_loader import get_cities
-from utils.llm_client import chat
+from utils.llm_client import chat_safe
+from utils.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()])
-
-logger = logging.getLogger(__name__)
+logger = setup_logging("city_compare", "city_compare.log")
 
 PROJECT_DIR = Path(__file__).parent.parent
 REPORTS_DIR = PROJECT_DIR / "reports" / "special"
@@ -35,7 +31,7 @@ def gather_city_news(months: int = 3):
             city=name, min_importance=2, limit=50,
         )
         city_news[name] = news
-        logger.info("%s: %d 条相关新闻", name, len(news))
+        logger.info("%s: %d related news", name, len(news))
 
     return city_news, start, end
 
@@ -63,7 +59,7 @@ def format_city_data(city_news: dict) -> str:
 
 def generate_city_compare(months: int = 3):
     """生成城市对比分析报告。"""
-    logger.info("收集各城市新闻（最近 %d 个月）...", months)
+    logger.info("Collecting city news (last %d months)...", months)
     city_news, start, end = gather_city_news(months)
     data_text = format_city_data(city_news)
 
@@ -101,8 +97,8 @@ def generate_city_compare(months: int = 3):
 
 要求：基于新闻事实，不做空泛判断。"""
 
-    logger.info("调用 Claude 生成城市对比分析...")
-    report = chat(system, [{"role": "user", "content": data_text}], max_tokens=4096)
+    logger.info("Calling LLM to generate city comparison...")
+    report = chat_safe(system, [{"role": "user", "content": data_text}], max_tokens=4096)
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = REPORTS_DIR / f"city-comparison-{datetime.now().strftime('%Y%m%d')}.md"
@@ -113,11 +109,24 @@ def generate_city_compare(months: int = 3):
 ---
 """
     output_path.write_text(header + report, encoding="utf-8")
-    logger.info("城市对比报告已保存: %s", output_path)
+    logger.info("City comparison report saved: %s", output_path)
+
+    # 写入报告索引
+    total_news = sum(len(v) for v in city_news.values())
+    relative_path = str(output_path.relative_to(PROJECT_DIR))
+    period = f"{start}_{end}"
+    insert_report("special_city_compare", period, relative_path, news_count=total_news,
+                  key_findings=extract_key_findings(report))
+    logger.info("Report index updated")
+
     return str(output_path)
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="城市对比分析")
+    parser.add_argument("--months", type=int, default=3, help="Months to look back (default: 3)")
+    args = parser.parse_args()
     init_db()
-    path = generate_city_compare()
-    print(f"\n城市对比报告已生成: {path}")
+    path = generate_city_compare(months=args.months)
+    print(f"\nCity comparison report generated: {path}")

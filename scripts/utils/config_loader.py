@@ -11,7 +11,7 @@ def _load_yaml(filename: str) -> dict:
     """加载单个 YAML 配置文件。"""
     path = CONFIG_DIR / filename
     if not path.exists():
-        raise FileNotFoundError(f"配置文件不存在: {path}")
+        raise FileNotFoundError(f"Config file not found: {path}")
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

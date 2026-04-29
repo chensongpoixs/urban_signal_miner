@@ -1,38 +1,46 @@
 #!/usr/bin/env python3
 """月报生成 — 月度趋势确认 + 跨领域关联 + 城市对比。"""
 import sys
-import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.db import init_db, search_news, get_source_stats
-from utils.llm_client import chat
+from utils.db import init_db, search_news, get_source_stats, insert_report, extract_key_findings
+from utils.llm_client import chat_safe
+from utils.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(Path(__file__).parent.parent / "logs" / "monthly.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging("monthly", "monthly.log")
 
 PROJECT_DIR = Path(__file__).parent.parent
 REPORTS_DIR = PROJECT_DIR / "reports" / "monthly"
 
 
-def get_month_range() -> tuple[str, str, str]:
-    """返回本月的 (month_key, start_date, end_date)。"""
+def get_month_range(month_str: str = None) -> tuple[str, str, str]:
+    """Returns (month_key, start_date, end_date). If month_str given, parse as YYYY-MM."""
+    if month_str:
+        import re
+        m = re.match(r"^(\d{4})-(\d{2})$", month_str)
+        if not m:
+            raise ValueError(f"Invalid month format: {month_str}, expected YYYY-MM")
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if not (1 <= month <= 12):
+            raise ValueError(f"Invalid month: {month}")
+        first_day = datetime(year, month, 1)
+        if month == 12:
+            last_day = datetime(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            last_day = datetime(year, month + 1, 1) - timedelta(days=1)
+        month_key = f"{year}-{month:02d}"
+        return month_key, first_day.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d")
+
     today = datetime.now()
     first_day = today.replace(day=1)
-    # 下月第一天减一天 = 本月最后一天
     if today.month == 12:
         last_day = today.replace(year=today.year + 1, month=1, day=1)
     else:
         last_day = today.replace(month=today.month + 1, day=1)
-    last_day = last_day - __import__('datetime').timedelta(days=1)
+    last_day = last_day - timedelta(days=1)
     month_key = f"{today.year}-{today.month:02d}"
     return month_key, first_day.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d")
 
@@ -66,10 +74,10 @@ def gather_news(start: str, end: str) -> str:
     return "\n".join(lines)
 
 
-def generate_monthly():
-    """生成月报。"""
-    month_key, start, end = get_month_range()
-    logger.info("生成月报: %s (%s ~ %s)", month_key, start, end)
+def generate_monthly(month_str: str = None):
+    """生成月报。month_str 如 '2026-03'，None 为本月。"""
+    month_key, start, end = get_month_range(month_str)
+    logger.info("Generating monthly report: %s (%s ~ %s)", month_key, start, end)
 
     init_db()
     news_text = gather_news(start, end)
@@ -122,8 +130,8 @@ def generate_monthly():
     if weekly_context:
         prompt += f"\n\n本月周报参考：\n{weekly_context}"
 
-    logger.info("调用 Claude 生成月报...")
-    report = chat(system, [{"role": "user", "content": prompt}], max_tokens=8192)
+    logger.info("Calling LLM to generate monthly report...")
+    report = chat_safe(system, [{"role": "user", "content": prompt}], max_tokens=8192)
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = REPORTS_DIR / f"{month_key}-report.md"
@@ -135,10 +143,22 @@ def generate_monthly():
 ---
 """
     output_path.write_text(header + report, encoding="utf-8")
-    logger.info("月报已保存: %s", output_path)
+    logger.info("Monthly report saved: %s", output_path)
+
+    # 写入报告索引
+    news_count = len([item for item in search_news(date_from=start, date_to=end, min_importance=3, limit=200)])
+    relative_path = str(output_path.relative_to(PROJECT_DIR))
+    insert_report("monthly", month_key, relative_path, news_count=news_count,
+                  key_findings=extract_key_findings(report))
+    logger.info("Report index updated")
+
     return str(output_path)
 
 
 if __name__ == "__main__":
-    path = generate_monthly()
-    print(f"\n月报已生成: {path}")
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate monthly report")
+    parser.add_argument("--month", default=None, help="Month to generate (YYYY-MM), default: current month")
+    args = parser.parse_args()
+    path = generate_monthly(month_str=args.month)
+    print(f"\nMonthly report generated: {path}")

@@ -1,34 +1,40 @@
 #!/usr/bin/env python3
 """周报生成 — 聚合本周重要新闻，AI 分析趋势信号。"""
 import sys
-import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.db import init_db, search_news, get_source_stats
-from utils.llm_client import chat
+from utils.db import init_db, search_news, insert_report, extract_key_findings
+from utils.llm_client import chat_safe
+from utils.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(Path(__file__).parent.parent / "logs" / "weekly.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging("weekly", "weekly.log")
 
 PROJECT_DIR = Path(__file__).parent.parent
 REPORTS_DIR = PROJECT_DIR / "reports" / "weekly"
 
 
-def get_week_range() -> tuple[str, str, str]:
-    """返回本周的 (week_key, start_date, end_date)。"""
+def get_week_range(week_str: str = None) -> tuple[str, str, str]:
+    """Returns (week_key, start_date, end_date). If week_str is given, parse as YYYY-WNN."""
+    if week_str:
+        # Parse "YYYY-WNN" format
+        import re
+        m = re.match(r"^(\d{4})-W(\d{2})$", week_str)
+        if not m:
+            raise ValueError(f"Invalid week format: {week_str}, expected YYYY-WNN")
+        year = int(m.group(1))
+        week = int(m.group(2))
+        from datetime import date
+        # Monday of the given ISO week
+        jan4 = date(year, 1, 4)
+        monday = jan4 - timedelta(days=jan4.isoweekday() - 1) + timedelta(weeks=week - 1)
+        sunday = monday + timedelta(days=6)
+        week_key = f"{year}-W{week:02d}"
+        return week_key, monday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
+
     today = datetime.now()
-    # 本周一
     monday = today - timedelta(days=today.weekday())
-    # 本周日
     sunday = monday + timedelta(days=6)
     week_key = f"{monday.year}-W{monday.isocalendar()[1]:02d}"
     return week_key, monday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
@@ -40,7 +46,7 @@ def gather_news(start: str, end: str) -> str:
     top = search_news(date_from=start, date_to=end, min_importance=3, limit=50)
 
     if not top:
-        logger.warning("本周无重要性>=3 的新闻")
+        logger.warning("No news with importance >= 3 this week")
         return "本周无重要新闻。"
 
     lines = [f"## 本周新闻（{start} ~ {end}），共 {len(top)} 条高重要性新闻\n"]
@@ -59,10 +65,10 @@ def gather_news(start: str, end: str) -> str:
     return "\n".join(lines)
 
 
-def generate_weekly():
-    """生成周报并保存到 reports/weekly/。"""
-    week_key, start, end = get_week_range()
-    logger.info("生成周报: %s (%s ~ %s)", week_key, start, end)
+def generate_weekly(week_str: str = None):
+    """生成周报并保存到 reports/weekly/。week_str 如 '2026-W17'，None 为本周。"""
+    week_key, start, end = get_week_range(week_str)
+    logger.info("Generating weekly report: %s (%s ~ %s)", week_key, start, end)
 
     init_db()
     news_text = gather_news(start, end)
@@ -101,8 +107,8 @@ def generate_weekly():
 总字数控制在 1500-2000 字。每个论断都要引用具体事件。"""
 
     prompt = f"以下是本周 ({start} ~ {end}) 的重要新闻合集，请生成周报：\n\n{news_text}"
-    logger.info("调用 Claude 生成周报...")
-    report = chat(system, [{"role": "user", "content": prompt}], max_tokens=4096)
+    logger.info("Calling LLM to generate weekly report...")
+    report = chat_safe(system, [{"role": "user", "content": prompt}], max_tokens=4096)
 
     # 保存报告
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -115,10 +121,22 @@ def generate_weekly():
 ---
 """
     output_path.write_text(header + report, encoding="utf-8")
-    logger.info("周报已保存: %s", output_path)
+    logger.info("Weekly report saved: %s", output_path)
+
+    # 写入报告索引
+    relative_path = str(output_path.relative_to(PROJECT_DIR))
+    news_count = len(search_news(date_from=start, date_to=end, min_importance=3, limit=200))
+    insert_report("weekly", week_key, relative_path, news_count=news_count,
+                  key_findings=extract_key_findings(report))
+    logger.info("Report index updated")
+
     return str(output_path)
 
 
 if __name__ == "__main__":
-    path = generate_weekly()
-    print(f"\n周报已生成: {path}")
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate weekly report")
+    parser.add_argument("--week", default=None, help="Week to generate (YYYY-WNN), default: current week")
+    args = parser.parse_args()
+    path = generate_weekly(week_str=args.week)
+    print(f"\nWeekly report generated: {path}")

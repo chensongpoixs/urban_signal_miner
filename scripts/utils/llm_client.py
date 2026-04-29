@@ -20,31 +20,55 @@ def _load_settings():
         return yaml.safe_load(f)
 
 
-def _get_model_config() -> dict:
-    """获取第一个模型配置。"""
+def _get_model_config(model_key=None) -> dict:
+    """Get model config by key (index, name, role, or None=first).
+
+    model_key:
+        None/int  → models[N] (default models[0])
+        "opus"     → match by name field (substring)
+        "fast"     → match by role field
+    """
     settings = _load_settings()
     models = settings.get("model", [])
     if not models:
-        raise RuntimeError("config/settings.yaml 中未配置 model")
+        raise RuntimeError("No model configured in config/settings.yaml")
+
+    if model_key is None:
+        return models[0]
+
+    if isinstance(model_key, int):
+        if model_key < len(models):
+            return models[model_key]
+        raise RuntimeError(f"Model index {model_key} out of range (total {len(models)})")
+
+    # string: match by name or role
+    for m in models:
+        if model_key.lower() in m.get("name", "").lower():
+            return m
+        if model_key.lower() == m.get("role", "").lower():
+            return m
+
+    # fallback: first model
+    logger.warning("Model '%s' not found, falling back to default", model_key)
     return models[0]
 
 
-def _get_client() -> anthropic.Anthropic:
-    cfg = _get_model_config()
+def _get_client(model_key=None) -> anthropic.Anthropic:
+    cfg = _get_model_config(model_key)
     api_key = cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        raise RuntimeError("未找到 API Key，请在 settings.yaml 的 model.api_key 中配置")
+        raise RuntimeError("API Key not found. Configure model.api_key in settings.yaml or set ANTHROPIC_API_KEY env var")
     base_url = cfg.get("base_url_anthropic", "https://api.deepseek.com/anthropic")
     timeout = cfg.get("timeout", 300)
     return anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
-def _get_model_name() -> str:
-    return _get_model_config().get("model", "deepseek-v4-pro")
+def _get_model_name(model_key=None) -> str:
+    return _get_model_config(model_key).get("model", "deepseek-v4-pro")
 
 
-def _get_max_retries() -> int:
-    return _get_model_config().get("max_retries", 3)
+def _get_max_retries(model_key=None) -> int:
+    return _get_model_config(model_key).get("max_retries", 3)
 
 
 def _get_text_from_response(response) -> str:
@@ -52,13 +76,14 @@ def _get_text_from_response(response) -> str:
     for block in response.content:
         if hasattr(block, "text"):
             return block.text
-    raise ValueError("响应中没有找到 TextBlock")
+    raise ValueError("No TextBlock found in response")
 
 
 def chat(
     system: str,
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
+    model_key=None,
     max_tokens: int = 4096,
     temperature: float = 0.3,
     use_cache: bool = True,
@@ -66,10 +91,12 @@ def chat(
     """
     发送单次对话请求，返回文本响应。
     自动重试。DeepSeek Anthropic 端点不支持 prompt caching，use_cache 参数忽略。
+
+    model_key: select by index, name, or role (e.g. 0, "opus", "fast")
     """
-    client = _get_client()
-    model = model or _get_model_name()
-    max_retries = _get_max_retries()
+    client = _get_client(model_key)
+    model = model or _get_model_name(model_key)
+    max_retries = _get_max_retries(model_key)
 
     api_kwargs: Dict[str, Any] = {
         "model": model,
@@ -83,7 +110,7 @@ def chat(
         try:
             response = client.messages.create(**api_kwargs)
             logger.info(
-                "API 调用成功 | model=%s | input_tokens=%s | output_tokens=%s",
+                "API call success | model=%s | input_tokens=%s | output_tokens=%s",
                 model,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
@@ -91,7 +118,7 @@ def chat(
             return _get_text_from_response(response)
         except Exception as e:
             wait = 2 ** attempt
-            logger.warning("API 调用失败 (attempt %d/%d): %s，%ds 后重试", attempt + 1, max_retries, e, wait)
+            logger.warning("API call failed (attempt %d/%d): %s, retry in %ds", attempt + 1, max_retries, e, wait)
             if attempt < max_retries - 1:
                 time.sleep(wait)
             else:
@@ -103,34 +130,36 @@ def chat_structured(
     prompt: str,
     output_schema: Type[BaseModel],
     model: Optional[str] = None,
+    model_key=None,
     temperature: float = 0.1,
 ) -> BaseModel:
     """
     发送消息并获取结构化 JSON 输出。
+    model_key: select by index, name, or role (e.g. 0, "opus", "fast")
     """
-    client = _get_client()
-    model = model or _get_model_name()
-    max_retries = _get_max_retries()
+    client = _get_client(model_key)
+    model = model or _get_model_name(model_key)
+    max_retries = _get_max_retries(model_key)
 
     for attempt in range(max_retries):
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=2048,
-                temperature=temperature,
+                max_tokens=2048, # 结构化输出通常较长，适当增加 max_tokens 上限
+                temperature=temperature, # 结构化输出需要更准确，降低温度
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = _get_text_from_response(response)
             json_str = _extract_json(text)
             logger.info(
-                "结构化输出成功 | model=%s | tokens=%s",
+                "Structured output success | model=%s | tokens=%s",
                 model, response.usage.output_tokens,
             )
             return output_schema.model_validate_json(json_str)
         except Exception as e:
             wait = 2 ** attempt
-            logger.warning("结构化输出失败 (attempt %d/%d): %s", attempt + 1, max_retries, e)
+            logger.warning("Structured output failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
             if attempt < max_retries - 1:
                 time.sleep(wait)
             else:
@@ -147,6 +176,15 @@ def _extract_json(text: str) -> str:
     if text.endswith("```"):
         text = text[:-3]
     return text.strip()
+
+
+def chat_safe(system: str, messages: list, model: str = None, model_key=None, max_tokens: int = 4096, temperature: float = 0.3) -> str:
+    """安全调用 chat()，失败时返回错误信息文本而非抛出异常。"""
+    try:
+        return chat(system, messages, model=model, model_key=model_key, max_tokens=max_tokens, temperature=temperature)
+    except Exception as e:
+        logger.error("LLM call ultimately failed: %s", e)
+        return f"\n\n> [报告生成失败: {e}]"
 
 
 def count_tokens_estimate(text: str) -> int:

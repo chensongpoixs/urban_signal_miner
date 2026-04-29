@@ -4,22 +4,14 @@ import sys
 import yaml
 import re
 import json
-import logging
 from pathlib import Path
-from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.db import init_db, insert_news, mark_file_processed
+from utils.file_utils import get_corpus_files
+from utils.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(Path(__file__).parent.parent / "logs" / "sync.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging("index_sync", "index_sync.log")
 
 NEWS_DIR = Path(__file__).parent.parent / "news-corpus"
 
@@ -43,28 +35,34 @@ def parse_frontmatter(filepath: Path) -> dict | None:
         data["file_path"] = str(filepath.relative_to(NEWS_DIR))
         return data
     except yaml.YAMLError as e:
-        logger.warning("YAML 解析失败 %s: %s", filepath.name, e)
+        logger.warning("YAML parse failed %s: %s", filepath.name, e)
         return None
 
 
-def sync_all():
-    """全量同步所有已增强的 .md 文件到数据库。"""
-    init_db()
+def sync_all(incremental: bool = False):
+    """Sync all enhanced .md files to database.
 
-    files = []
-    for date_dir in sorted(NEWS_DIR.iterdir()):
-        if not date_dir.is_dir() or not date_dir.name.isdigit():
-            continue
-        for source_dir in sorted(date_dir.iterdir()):
-            if not source_dir.is_dir():
-                continue
-            for md_file in sorted(source_dir.glob("*.md")):
-                if md_file.name.startswith("."):
-                    continue
-                files.append(md_file)
+    Args:
+        incremental: If True, only sync files not yet in processed_files.
+                     If False (default), full sync with REPLACE INTO.
+    """
+    from utils.db import is_file_processed, get_db
+    init_db()
+    files = get_corpus_files(NEWS_DIR)
+
+    if incremental:
+        unprocessed = []
+        for fp in files:
+            rel = str(fp.relative_to(NEWS_DIR))
+            if not is_file_processed(rel):
+                unprocessed.append(fp)
+        skipped = len(files) - len(unprocessed)
+        logger.info("Incremental sync: %d total, %d skipped, %d pending", len(files), skipped, len(unprocessed))
+        files = unprocessed
 
     total = len(files)
-    logger.info("全量同步: %d 个文件", total)
+    if not incremental:
+        logger.info("Full sync: %d files", total)
 
     synced = 0
     for fp in files:
@@ -77,10 +75,14 @@ def sync_all():
             mark_file_processed(rel)
             synced += 1
         except Exception as e:
-            logger.error("同步失败 %s: %s", fp.name, e)
+            logger.error("Sync failed %s: %s", fp.name, e)
 
-    logger.info("同步完成: %d/%d", synced, total)
+    logger.info("Sync complete: %d/%d", synced, total)
 
 
 if __name__ == "__main__":
-    sync_all()
+    import argparse
+    parser = argparse.ArgumentParser(description="Sync enhanced Markdown to database")
+    parser.add_argument("--incremental", action="store_true", help="Only sync unprocessed files")
+    args = parser.parse_args()
+    sync_all(incremental=args.incremental)

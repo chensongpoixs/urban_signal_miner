@@ -24,13 +24,19 @@ news-corpus/ (git pull 同步)
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-# 同步数据
-python scripts/sync_news.py                    # git pull + 检测新文件
+# 配置校验
+python scripts/config_validate.py                # 启动前检查配置和连接
 
-# AI 打标（核心管线）
-python scripts/classify.py --dry-run           # 预览模式
-python scripts/classify.py --limit 10          # 仅打标10条（测试）
-python scripts/classify.py                     # 全量打标所有未处理文件
+# 一键流水线
+python run_pipeline.py                           # 完整流水线（同步→打标→索引→报告）
+python run_pipeline.py --classify-limit 50       # 测试模式
+python run_pipeline.py --config-only             # 仅校验配置
+python run_pipeline.py --skip-report             # 跳过报告生成
+
+# 单独步骤
+python scripts/sync_news.py                      # git pull + 检测新文件
+python scripts/classify.py --dry-run             # 预览模式
+python scripts/classify.py --limit 10            # 仅打标10条（测试）
 
 # 数据库同步
 python scripts/index_sync.py                   # 全量重建索引
@@ -56,13 +62,15 @@ python scripts/gen_causal_chain.py --topic "AI芯片" --months 6  # 因果链追
 - SQLite：FTS5 全文搜索，无需额外依赖
 - MySQL：FULLTEXT INDEX，需要 `pymysql`，自动建库
 
-### LLM 分层策略
+### LLM 调用策略
 
-`scripts/utils/llm_client.py` 封装了 Claude API 调用，支持 prompt caching、自动重试（指数退避）、结构化输出、Batch API：
+`scripts/utils/llm_client.py` 通过 Anthropic 兼容端点调用模型，支持自动重试（指数退避）和结构化 JSON 输出：
 
-- **Haiku**（`cheap_model`）：`classify.py` 日常打标 — 领域分类、城市关联、实体提取、重要性评分、摘要生成
-- **Sonnet**（`default_model`）：周报、月报生成
-- **Opus**（`thinking_model`）：季度深度报告（两阶段：Sonnet预提炼+Opus深度推理）
+- **`chat()`** — 普通文本对话，report generators 使用
+- **`chat_structured()`** — Pydantic 模型校验的 JSON 输出，`classify.py` 使用
+- **`chat_safe()`** — 包装了异常捕获的 `chat()`，失败时返回错误文本而非崩溃，所有报告生成脚本使用
+- 模型配置在 `config/settings.yaml` 的 `model` 列表中，当前使用第一个模型，通过 `base_url_anthropic` 指定 Anthropic 兼容端点
+- 不支持 Anthropic 原生的 prompt caching 和 Batch API（这些功能在非官方端点不可用）
 
 ### 分类打标机制
 

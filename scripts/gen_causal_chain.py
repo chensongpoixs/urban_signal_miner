@@ -7,19 +7,15 @@
   python gen_causal_chain.py --topic "自动驾驶" --months 6  # 按主题追踪
 """
 import sys
-import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.db import init_db, search_news
-from utils.llm_client import chat
+from utils.db import init_db, search_news, insert_report, extract_key_findings
+from utils.llm_client import chat_safe
+from utils.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()])
-
-logger = logging.getLogger(__name__)
+logger = setup_logging("causal_chain", "causal_chain.log")
 
 PROJECT_DIR = Path(__file__).parent.parent
 REPORTS_DIR = PROJECT_DIR / "reports" / "special"
@@ -36,7 +32,7 @@ def find_related_news(keyword: str, months: int = 6) -> list:
         min_importance=2, limit=100,
     )
     # 按日期升序排列（用于因果链分析）
-    news.sort(key=lambda x: x["date"])
+    news.sort(key=lambda x: x.get("date", ""))
     return news
 
 
@@ -69,11 +65,11 @@ def format_chain_data(news: list, topic: str) -> str:
 
 def generate_causal_chain(topic: str, months: int = 6):
     """生成因果链分析报告。"""
-    logger.info("搜索与 '%s' 相关的新闻...", topic)
+    logger.info("Searching news related to '%s'...", topic)
     news = find_related_news(topic, months)
 
     if len(news) < 5:
-        logger.warning("相关新闻数量不足（%d条），难以构建因果链", len(news))
+        logger.warning("Insufficient related news (%d items), causal chain may be weak", len(news))
 
     data_text = format_chain_data(news, topic)
 
@@ -128,8 +124,8 @@ def generate_causal_chain(topic: str, months: int = 6):
 
 要求：每个因果链接都要有具体的新闻事件支撑。不确定的地方明确标注。"""
 
-    logger.info("调用 Claude 生成因果链分析...")
-    report = chat(system, [{"role": "user", "content": data_text}], max_tokens=4096)
+    logger.info("Calling LLM to generate causal chain analysis...")
+    report = chat_safe(system, [{"role": "user", "content": data_text}], max_tokens=4096)
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     safe_topic = topic.replace("/", "-").replace(" ", "_")[:30]
@@ -142,17 +138,25 @@ def generate_causal_chain(topic: str, months: int = 6):
 ---
 """
     output_path.write_text(header + report, encoding="utf-8")
-    logger.info("因果链报告已保存: %s", output_path)
+    logger.info("Causal chain report saved: %s", output_path)
+
+    # 写入报告索引
+    relative_path = str(output_path.relative_to(PROJECT_DIR))
+    period = f"causal_{topic[:20]}"
+    insert_report("special_causal_chain", period, relative_path, news_count=len(news),
+                  key_findings=extract_key_findings(report))
+    logger.info("Report index updated")
+
     return str(output_path)
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="因果链专题分析")
-    parser.add_argument("--topic", required=True, help="分析主题关键词，如 '自动驾驶' '中美芯片' '房价'")
-    parser.add_argument("--months", type=int, default=6, help="回溯月份数")
+    parser.add_argument("--topic", required=True, help="Topic keyword, e.g. '自动驾驶' '中美芯片'")
+    parser.add_argument("--months", type=int, default=6, help="Months to look back")
     args = parser.parse_args()
 
     init_db()
     path = generate_causal_chain(topic=args.topic, months=args.months)
-    print(f"\n因果链报告已生成: {path}")
+    print(f"\nCausal chain report generated: {path}")
