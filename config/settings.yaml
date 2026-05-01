@@ -26,10 +26,11 @@ model:
 
 # 报告生成 token 限制
 llm_limits:
-  classify_max_tokens: 2048      # classify.py 结构化输出
+  classify_max_tokens: 1024      # classify.py 结构化输出（JSON 通常 < 500 tokens）
   classify_batch_size: 30        # 每批处理新闻数
-  classify_interval_seconds: 1   # API 调用间隔（秒），避免限流
-  classify_body_chars: 3000      # 正文截断字符数
+  classify_interval_seconds: 0   # API 调用间隔（秒），本地模型设为0
+  classify_body_chars: 2000      # 正文截断字符数（减少输入可提速）
+  classify_workers: 4            # 并发 worker 数（I/O 密集，可设大）
   weekly_max_tokens: 4096        # 周报
   monthly_max_tokens: 8192       # 月报
   quarterly_max_tokens: 8192     # 季度深度报告

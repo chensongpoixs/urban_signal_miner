@@ -59,6 +59,53 @@ class NewsClassification(BaseModel):
     quality_pass: bool = Field(default=True,
         description="是否通过质量筛选（纯广告/纯八卦/无实质内容=不通过）")
 
+# ── JSON 标准化 ──────────────────────────────────────────
+
+def normalize_classification_json(raw: dict) -> dict:
+    """Fix common LLM output format issues before Pydantic validation.
+
+    Local models often return:
+    - domain as a string instead of list
+    - entities as {type: [names]} dict instead of [{name, type}] list
+    """
+    # Fix domain: string → list
+    if isinstance(raw.get("domain"), str):
+        raw["domain"] = [raw["domain"]]
+
+    # Fix cities: string → list
+    if isinstance(raw.get("cities"), str):
+        raw["cities"] = [raw["cities"]] if raw["cities"] else []
+
+    # Fix tags: string → list
+    if isinstance(raw.get("tags"), str):
+        raw["tags"] = [t.strip() for t in raw["tags"].split(",") if t.strip()]
+
+    # Fix entities: dict-of-lists → list-of-objects
+    entities = raw.get("entities")
+    if isinstance(entities, dict):
+        fixed = []
+        for ent_type, names in entities.items():
+            if isinstance(names, list):
+                for name in names:
+                    if isinstance(name, str) and name.strip():
+                        fixed.append({"name": name.strip(), "type": ent_type})
+            elif isinstance(names, str) and names.strip():
+                fixed.append({"name": names.strip(), "type": ent_type})
+        raw["entities"] = fixed
+
+    # Fix individual entity: string → dict
+    if isinstance(raw.get("entities"), list):
+        fixed = []
+        for e in raw["entities"]:
+            if isinstance(e, str):
+                fixed.append({"name": e.strip(), "type": "unknown"})
+            elif isinstance(e, dict):
+                fixed.append(e)
+        raw["entities"] = fixed
+
+    return raw
+
+
 # ── 去重 & 预筛 ────────────────────────────────────────
 
 def check_title_similarity(title: str, date_str: str) -> bool:
@@ -319,8 +366,24 @@ ai_why_matters: "{safe_why}"
 
 # ── 主处理流程 ──────────────────────────────────────────
 
-def process_files(filepaths: list[Path], dry_run: bool = False):
-    """处理文件列表，增强每个文件。支持断点续跑（跳过已处理文件）。"""
+def classify_one(article: dict, system: str) -> dict:
+    """Call LLM for a single article. Returns result dict or raises."""
+    title = article["title"]
+    city_hints = prefilter_cities(title, article.get("body", ""))
+    prompt = build_classify_prompt(article)
+    if city_hints:
+        prompt += f"\n\n提示：以下城市的关键词在文中出现，请重点关注: {', '.join(city_hints)}"
+
+    result = chat_structured(system, prompt, NewsClassification,
+                           normalizer=normalize_classification_json)
+    return result
+
+
+def process_files(filepaths: list[Path], dry_run: bool = False, workers: int = 1):
+    """处理文件列表，增强每个文件。支持断点续跑与并发。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+
     settings = get_settings()
 
     # 过滤已处理的（断点续跑）
@@ -349,83 +412,102 @@ def process_files(filepaths: list[Path], dry_run: bool = False):
     body_chars = settings.get("llm_limits", {}).get("classify_body_chars", 3000)
     total = len(unprocessed)
 
-    from tqdm import tqdm
-
-    pbar = tqdm(total=total, desc="AI 打标", unit="条",
+    pbar = tqdm(total=total, desc="AI classify", unit="art.",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+
+    # Build system prompt once
+    system = CLASSIFY_SYSTEM.format(
+        domains=build_domain_list(),
+        cities=build_city_list(),
+    )
 
     for batch_start in range(0, total, batch_size):
         batch = unprocessed[batch_start:batch_start + batch_size]
 
-        # 解析所有文件
-        articles = []
+        # Phase 1: Parse + dedup (main thread, fast)
+        tasks = []
         for fp in batch:
             article = parse_raw_md(fp, body_chars=body_chars)
-            if article:
-                articles.append(article)
+            if not article:
+                pbar.update(1)
+                continue
 
-        if not articles:
-            pbar.update(len(batch))
+            date_str = extract_date_from_path(article["filepath"])
+            title = article["title"]
+
+            # Title similarity dedup check
+            if check_title_similarity(title, date_str):
+                rel = article["filepath"].relative_to(NEWS_DIR)
+                mark_file_processed(str(rel))
+                tqdm.write(f"Dup: {title[:50]}")
+                pbar.update(1)
+                continue
+
+            tasks.append(article)
+
+        if not tasks:
             continue
 
-        # 构建带领域/城市信息的 system prompt
-        system = CLASSIFY_SYSTEM.format(
-            domains=build_domain_list(),
-            cities=build_city_list(),
-        )
-
-        # 逐条调用
-        for article in articles:
-            try:
-                date_str = extract_date_from_path(article["filepath"])
-                title = article["title"]
-
-                # B2: 标题相似度预筛
-                if check_title_similarity(title, date_str):
-                    rel = article["filepath"].relative_to(NEWS_DIR)
-                    mark_file_processed(str(rel))
-                    tqdm.write(f"⊘ Dup: {title[:50]}")
+        # Phase 2: API calls (concurrent)
+        if workers > 1 and len(tasks) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(classify_one, art, system): art for art in tasks}
+                for future in as_completed(futures):
+                    article = futures[future]
+                    try:
+                        result = future.result()
+                        _handle_result(article, result, pbar)
+                    except Exception as e:
+                        logger.error("Classify failed %s: %s", article["filepath"].name, e)
+                        pbar.update(1)
+                    if interval > 0:
+                        time.sleep(interval)
+        else:
+            # Single-threaded path
+            for article in tasks:
+                try:
+                    result = classify_one(article, system)
+                    _handle_result(article, result, pbar)
+                except Exception as e:
+                    logger.error("Classify failed %s: %s", article["filepath"].name, e)
                     pbar.update(1)
-                    continue
-
-                # B3: 城市关键词预筛，注入 prompt
-                city_hints = prefilter_cities(title, article.get("body", ""))
-                prompt = build_classify_prompt(article)
-                if city_hints:
-                    prompt += f"\n\n提示：以下城市的关键词在文中出现，请重点关注: {', '.join(city_hints)}"
-
-                result = chat_structured(system, prompt, NewsClassification)
-
-                if result.is_duplicate or not result.quality_pass:
-                    rel = article["filepath"].relative_to(NEWS_DIR)
-                    tqdm.write(f"⊘ Skip: {rel.name[:50]} (dup/low quality)")
-                    mark_file_processed(str(rel))
-                    pbar.update(1)
-                    continue
-
-                enhance_file(article["filepath"], result, article)
-                mark_file_processed(str(article["filepath"].relative_to(NEWS_DIR)))
-                pbar.update(1)
-                tqdm.write(f"OK ★{result.importance} {title[:60]}")
-
-            except Exception as e:
-                logger.error("Classify failed %s: %s", article["filepath"].name, e)
-                # 不标记为已处理，下次重试（断点续跑）
-                pbar.update(1)
-
-            # API 速率限制
-            if interval > 0:
-                time.sleep(interval)
+                if interval > 0:
+                    time.sleep(interval)
 
     pbar.close()
 
 
+def _handle_result(article: dict, result, pbar):
+    """Process classification result: mark file, enhance, update progress."""
+    title = article["title"]
+    if result.is_duplicate or not result.quality_pass:
+        rel = article["filepath"].relative_to(NEWS_DIR)
+        tqdm_write_safe(f"Skip: {rel.name[:50]} (dup/low quality)")
+        mark_file_processed(str(rel))
+        pbar.update(1)
+        return
+
+    enhance_file(article["filepath"], result, article)
+    mark_file_processed(str(article["filepath"].relative_to(NEWS_DIR)))
+    pbar.update(1)
+    tqdm_write_safe(f"OK *{result.importance} {title[:60]}")
+
+
+def tqdm_write_safe(msg: str):
+    """Write message without breaking tqdm progress bar (also works from threads)."""
+    from tqdm import tqdm
+    tqdm.write(msg)
+
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="AI 新闻分类增强")
+    settings = get_settings()
+    parser = argparse.ArgumentParser(description="AI news classify")
     parser.add_argument("--dry-run", action="store_true", help="Preview mode, no file modification")
     parser.add_argument("--files", nargs="*", help="Specific files (optional, scan all if omitted)")
     parser.add_argument("--limit", type=int, default=0, help="Max files to process (for testing)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Concurrent workers (default: from settings llm_limits.classify_workers, or 1)")
     args = parser.parse_args()
 
     init_db()
@@ -438,9 +520,11 @@ if __name__ == "__main__":
     if args.limit > 0:
         filepaths = filepaths[:args.limit]
 
+    workers = args.workers or settings.get("llm_limits", {}).get("classify_workers", 1)
+
     logger.info("=" * 50)
-    logger.info("News classify started")
+    logger.info("News classify started (workers=%d)", workers)
     logger.info("Files to scan: %d", len(filepaths))
 
-    process_files(filepaths, dry_run=args.dry_run)
+    process_files(filepaths, dry_run=args.dry_run, workers=workers)
     logger.info("News classify completed")

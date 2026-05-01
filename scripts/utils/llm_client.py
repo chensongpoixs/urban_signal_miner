@@ -132,11 +132,14 @@ def chat_structured(
     model: Optional[str] = None,
     model_key=None,
     temperature: float = 0.1,
+    normalizer=None,
 ) -> BaseModel:
     """
     发送消息并获取结构化 JSON 输出。
     model_key: select by index, name, or role (e.g. 0, "opus", "fast")
+    normalizer: optional callback to fix raw JSON dict before Pydantic validation
     """
+    import json
     client = _get_client(model_key)
     model = model or _get_model_name(model_key)
     max_retries = _get_max_retries(model_key)
@@ -145,13 +148,23 @@ def chat_structured(
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=2048, # 结构化输出通常较长，适当增加 max_tokens 上限
-                temperature=temperature, # 结构化输出需要更准确，降低温度
+                max_tokens=2048,
+                temperature=temperature,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = _get_text_from_response(response)
             json_str = _extract_json(text)
+
+            # Apply normalizer to fix common LLM output format issues
+            if normalizer:
+                try:
+                    raw = json.loads(json_str)
+                    raw = normalizer(raw)
+                    json_str = json.dumps(raw, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    pass  # If parsing fails, let Pydantic report the error
+
             logger.info(
                 "Structured output success | model=%s | tokens=%s",
                 model, response.usage.output_tokens,

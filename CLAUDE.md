@@ -67,9 +67,9 @@ python scripts/gen_causal_chain.py --topic "AI芯片" --months 6  # 因果链追
 `scripts/utils/llm_client.py` 通过 Anthropic 兼容端点调用模型，支持自动重试（指数退避）和结构化 JSON 输出：
 
 - **`chat()`** — 普通文本对话，report generators 使用
-- **`chat_structured()`** — Pydantic 模型校验的 JSON 输出，`classify.py` 使用
+- **`chat_structured()`** — Pydantic 模型校验的 JSON 输出，`classify.py` 使用。支持 `normalizer` 回调修复本地模型输出格式问题（如 domain 返回字符串而非数组）
 - **`chat_safe()`** — 包装了异常捕获的 `chat()`，失败时返回错误文本而非崩溃，所有报告生成脚本使用
-- 模型配置在 `config/settings.yaml` 的 `model` 列表中，当前使用第一个模型，通过 `base_url_anthropic` 指定 Anthropic 兼容端点
+- 模型配置在 `config/settings.yaml` 的 `model` 列表中，支持 `model_key` 按 `role`/`name`/索引选择模型
 - 不支持 Anthropic 原生的 prompt caching 和 Batch API（这些功能在非官方端点不可用）
 
 ### 分类打标机制
@@ -77,9 +77,23 @@ python scripts/gen_causal_chain.py --topic "AI芯片" --months 6  # 因果链追
 `classify.py` 是核心管线：
 1. 扫描 `news-corpus/{YYYYMMDD}/{source}/*.md` 找未增强文件（不以 `---` 开头）
 2. 解析原始元数据（来源平台、排名、原文链接、正文）
-3. 通过 Pydantic `NewsClassification` 模型做结构化输出
-4. 跳过 `is_duplicate=true` 或 `quality_pass=false` 的条目
-5. 对通过筛选的文件插入 YAML frontmatter 并更新数据库
+3. 标题相似度预筛（`difflib.SequenceMatcher`，阈值 0.8），命中则跳过 LLM 调用
+4. 城市关键词预筛（匹配 `cities.yaml` 中的关键词），匹配结果注入 prompt 缩小 LLM 候选范围
+5. 通过 Pydantic `NewsClassification` 模型做结构化输出
+6. `normalize_classification_json()` 修复本地模型常见格式问题（domain 字符串→数组、entities dict→list）
+7. 跳过 `is_duplicate=true` 或 `quality_pass=false` 的条目
+8. 对通过筛选的文件插入 YAML frontmatter 并更新数据库
+9. 支持并发（`--workers N`），I/O 密集型可用 ThreadPoolExecutor 提速
+
+### 速度调优
+
+本地模型 classify 慢时，调整 `config/settings.yaml` 中的 `llm_limits`：
+- `classify_workers: 4` — 并发调用数（I/O 密集，可设 4-8）
+- `classify_max_tokens: 1024` — 分类输出是 JSON，不需要 2048
+- `classify_interval_seconds: 0` — 本地模型无需限流间隔
+- `classify_body_chars: 2000` — 减少正文截断长度
+
+也可通过 CLI 覆盖：`python scripts/classify.py --workers 8`
 
 ### 11个新闻来源差异化
 
