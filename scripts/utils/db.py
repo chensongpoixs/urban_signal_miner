@@ -274,11 +274,15 @@ def init_db():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """)
 
-        # Auto-migrate: fix key_findings column type from JSON to TEXT (for existing installs)
+        # Auto-migrate: fix charset for tables that may have been created without utf8mb4
         try:
-            db.execute("ALTER TABLE reports_index MODIFY COLUMN key_findings TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+            db.execute("ALTER TABLE news_index CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
         except Exception as e:
-            logger.warning("Auto-migrate reports_index.key_findings failed: %s (may already be migrated)", e)
+            logger.warning("Auto-migrate news_index charset failed: %s", e)
+        try:
+            db.execute("ALTER TABLE reports_index CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        except Exception as e:
+            logger.warning("Auto-migrate reports_index charset failed: %s", e)
 
     logger.info("Database tables initialized [%s]", db.type)
 
