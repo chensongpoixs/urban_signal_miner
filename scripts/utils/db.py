@@ -269,10 +269,16 @@ def init_db():
                 period_key VARCHAR(32) NOT NULL,
                 file_path VARCHAR(256) NOT NULL,
                 news_count INT,
-                key_findings JSON,
+                key_findings TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """)
+
+        # Auto-migrate: fix key_findings column type from JSON to TEXT (for existing installs)
+        try:
+            db.execute("ALTER TABLE reports_index MODIFY COLUMN key_findings TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        except Exception as e:
+            logger.warning("Auto-migrate reports_index.key_findings failed: %s (may already be migrated)", e)
 
     logger.info("Database tables initialized [%s]", db.type)
 

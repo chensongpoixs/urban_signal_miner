@@ -20,7 +20,8 @@ def parse_frontmatter(filepath: Path) -> dict | None:
     """从 Markdown 文件读取 YAML frontmatter。"""
     try:
         content = filepath.read_text(encoding="utf-8")
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to read file %s: %s", filepath.name, e)
         return None
 
     if not content.strip().startswith("---"):

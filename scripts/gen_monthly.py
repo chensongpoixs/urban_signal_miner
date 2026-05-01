@@ -90,8 +90,8 @@ def generate_monthly(month_str: str = None):
         for wf in weekly_files:
             try:
                 weekly_context += f"\n{wf.read_text(encoding='utf-8')[:2000]}\n"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to read weekly report %s: %s", wf.name, e)
 
     system = """你是资深战略分析师。基于本月重要新闻，生成深度月报。
 

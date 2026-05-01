@@ -40,7 +40,8 @@ def get_unenhanced_files(corpus_dir: Path) -> List[Path]:
             content = fp.read_text(encoding="utf-8")
             if not content.strip().startswith("---"):
                 unenhanced.append(fp)
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to read file %s: %s", fp.name, e)
             continue
     return unenhanced
 

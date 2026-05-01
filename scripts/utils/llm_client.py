@@ -197,7 +197,7 @@ def chat_safe(system: str, messages: list, model: str = None, model_key=None, ma
         return chat(system, messages, model=model, model_key=model_key, max_tokens=max_tokens, temperature=temperature)
     except Exception as e:
         logger.error("LLM call ultimately failed: %s", e)
-        return f"\n\n> [报告生成失败: {e}]"
+        return f"\n\n> [Report generation failed: {e}]"
 
 
 def count_tokens_estimate(text: str) -> int:
