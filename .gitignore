@@ -27,3 +27,4 @@ build/
 
 # 新闻语料（从 ModelScope git clone，不需要提交）
 /news-corpus
+/frontend/node_modules

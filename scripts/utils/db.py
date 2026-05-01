@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
+import threading
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -169,13 +171,29 @@ class _DB:
 # ── 全局实例 ─────────────────────────────────────────────
 
 _db: Optional[_DB] = None
+_db_lock = threading.Lock()
 
 
 def get_db() -> _DB:
     global _db
     if _db is None:
-        _db = _DB()
+        with _db_lock:
+            if _db is None:
+                _db = _DB()
     return _db
+
+
+def close_db():
+    """Close database connection. Safe to call multiple times."""
+    global _db
+    with _db_lock:
+        if _db is not None:
+            try:
+                _db.close()
+            except Exception as e:
+                logger.warning("Error closing database: %s", e)
+            finally:
+                _db = None
 
 
 # ── 公共 API（与旧版兼容）────────────────────────────────
@@ -228,6 +246,9 @@ def init_db():
                 key_findings TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_type_period
+                ON reports_index(report_type, period_key);
         """)
     else:
         # MySQL --- DROP TABLE IF EXISTS news_index; CREATE TABLE news_index (...)
@@ -283,6 +304,12 @@ def init_db():
             db.execute("ALTER TABLE reports_index CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
         except Exception as e:
             logger.warning("Auto-migrate reports_index charset failed: %s", e)
+
+        # Auto-migrate: add unique index on (report_type, period_key) for existing MySQL installs
+        try:
+            db.execute("ALTER TABLE reports_index ADD UNIQUE INDEX idx_reports_type_period (report_type, period_key)")
+        except Exception as e:
+            logger.warning("Auto-migrate reports_index unique index failed (may already exist): %s", e)
 
     logger.info("Database tables initialized [%s]", db.type)
 
@@ -442,7 +469,7 @@ def get_source_stats(date_from: str, date_to: str) -> List[Dict]:
     cur = db.execute(
         "SELECT source, source_name, COUNT(*) as cnt, AVG(importance) as avg_imp "
         "FROM news_index WHERE date BETWEEN ? AND ? "
-        "GROUP BY source ORDER BY cnt DESC",
+        "GROUP BY source, source_name ORDER BY cnt DESC",
         (date_from, date_to),
     )
     rows = cur.fetchall()
@@ -501,12 +528,217 @@ def extract_key_findings(report_text: str, max_chars: int = 500) -> str:
 
 
 def insert_report(report_type: str, period_key: str, file_path: str, news_count: int = 0, key_findings: str = ""):
-    """插入一条报告索引记录。"""
+    """Upsert a report index record. Replaces existing report for same type+period."""
     db = get_db()
     from datetime import datetime
+    # Delete existing first for cross-DB upsert semantics
+    db.execute(
+        "DELETE FROM reports_index WHERE report_type = ? AND period_key = ?",
+        (report_type, period_key),
+    )
     sql = f"""
         INSERT INTO reports_index (report_type, period_key, file_path, news_count, key_findings, created_at)
         VALUES ({",".join(["?"] * 6)})
     """
     db.execute(sql, (report_type, period_key, file_path, news_count, key_findings, datetime.now().isoformat()))
     db.commit()
+
+
+# ── 报告查询 ──────────────────────────────────────────────
+
+def get_reports(
+    report_type: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """Query reports_index with optional filters, ordered by created_at DESC."""
+    db = get_db()
+    sql = "SELECT * FROM reports_index WHERE 1=1"
+    params: List[Any] = []
+    if report_type:
+        sql += " AND report_type = ?"
+        params.append(report_type)
+    if date_from:
+        sql += " AND created_at >= ?"
+        params.append(date_from)
+    if date_to:
+        sql += " AND created_at <= ?"
+        params.append(date_to)
+    sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    cur = db.execute(sql, params)
+    rows = cur.fetchall()
+    results = []
+    for r in rows:
+        if db.type == "sqlite":
+            d = dict(r)
+        else:
+            d = dict(zip([c[0] for c in cur.description], r))
+        # Convert datetime to string for JSON serialization
+        if d.get("created_at") and hasattr(d["created_at"], "isoformat"):
+            d["created_at"] = d["created_at"].isoformat()
+        results.append(d)
+    return results
+
+
+def get_report_by_key(report_type: str, period_key: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single report by type + period_key. Returns None if not found."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT * FROM reports_index WHERE report_type = ? AND period_key = ?",
+        (report_type, period_key),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    if db.type == "sqlite":
+        d = dict(row)
+    else:
+        d = dict(zip([c[0] for c in cur.description], row))
+    if d.get("created_at") and hasattr(d["created_at"], "isoformat"):
+        d["created_at"] = d["created_at"].isoformat()
+    return d
+
+
+def delete_report(report_type: str, period_key: str) -> bool:
+    """Delete a report record from reports_index. Returns True if a row was deleted."""
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM reports_index WHERE report_type = ? AND period_key = ?",
+        (report_type, period_key),
+    )
+    db.commit()
+    return cur.rowcount > 0 if hasattr(cur, "rowcount") else False
+
+
+def check_report_exists(report_type: str, period_key: str) -> bool:
+    """Quick existence check without fetching full row."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT 1 FROM reports_index WHERE report_type = ? AND period_key = ?",
+        (report_type, period_key),
+    )
+    return cur.fetchone() is not None
+
+
+def count_reports(report_type: Optional[str] = None) -> int:
+    db = get_db()
+    if report_type:
+        row = db.execute(
+            "SELECT COUNT(*) FROM reports_index WHERE report_type = ?",
+            (report_type,),
+        ).fetchone()
+    else:
+        row = db.execute("SELECT COUNT(*) FROM reports_index").fetchone()
+    return row[0] if row else 0
+
+
+# ── Dashboard 聚合 ─────────────────────────────────────────
+
+def get_daily_news_counts(date_from: str, date_to: str) -> List[Dict]:
+    """SELECT date, COUNT(*), AVG(importance) GROUP BY date for dashboard chart."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT date, COUNT(*) as cnt, AVG(importance) as avg_imp "
+        "FROM news_index WHERE date BETWEEN ? AND ? "
+        "GROUP BY date ORDER BY date ASC",
+        (date_from, date_to),
+    )
+    rows = cur.fetchall()
+    results = []
+    for r in rows:
+        if db.type == "sqlite":
+            d = dict(r)
+        else:
+            d = dict(zip([c[0] for c in cur.description], r))
+        if hasattr(d.get("avg_imp"), "real"):  # Decimal from MySQL
+            d["avg_imp"] = float(d["avg_imp"])
+        results.append(d)
+    return results
+
+
+def get_domain_distribution(date_from: str, date_to: str) -> List[Dict]:
+    """Aggregate domain counts by parsing domain JSON across date range."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT domain FROM news_index WHERE date BETWEEN ? AND ?",
+        (date_from, date_to),
+    )
+    rows = cur.fetchall()
+    domain_counts: Dict[str, int] = {}
+    for r in rows:
+        val = r[0] if isinstance(r, (tuple, list)) else r.get("domain", "[]") if isinstance(r, dict) else r[0]
+        domains = json.loads(val) if isinstance(val, str) else (val or [])
+        for d in domains:
+            domain_counts[d] = domain_counts.get(d, 0) + 1
+    total = sum(domain_counts.values()) or 1
+    return sorted(
+        [{"domain": k, "count": v, "percentage": round(v / total * 100, 1)} for k, v in domain_counts.items()],
+        key=lambda x: x["count"], reverse=True,
+    )
+
+
+def get_city_distribution(date_from: str, date_to: str) -> List[Dict]:
+    """Aggregate city counts by parsing cities JSON across date range."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT cities FROM news_index WHERE date BETWEEN ? AND ?",
+        (date_from, date_to),
+    )
+    rows = cur.fetchall()
+    city_counts: Dict[str, int] = {}
+    for r in rows:
+        val = r[0] if isinstance(r, (tuple, list)) else r.get("cities", "[]") if isinstance(r, dict) else r[0]
+        cities = json.loads(val) if isinstance(val, str) else (val or [])
+        for c in cities:
+            city_counts[c] = city_counts.get(c, 0) + 1
+    total = sum(city_counts.values()) or 1
+    return sorted(
+        [{"city": k, "count": v, "percentage": round(v / total * 100, 1)} for k, v in city_counts.items()],
+        key=lambda x: x["count"], reverse=True,
+    )
+
+
+def get_importance_distribution(date_from: str, date_to: str) -> Dict[int, int]:
+    """SELECT importance, COUNT(*) GROUP BY importance."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT importance, COUNT(*) as cnt FROM news_index "
+        "WHERE date BETWEEN ? AND ? GROUP BY importance ORDER BY importance",
+        (date_from, date_to),
+    )
+    rows = cur.fetchall()
+    result: Dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    for r in rows:
+        if db.type == "sqlite":
+            imp, cnt = r["importance"], r["cnt"]
+        else:
+            imp, cnt = r[0], r[1]
+        result[int(imp)] = int(cnt)
+    return result
+
+
+def get_news_count_by_source(date_from: str, date_to: str) -> List[Dict]:
+    """Aggregate news count by source for dashboard chart."""
+    return get_source_stats(date_from, date_to)  # Reuse existing function
+
+
+def get_news_total_stats(date_from: str, date_to: str) -> Dict:
+    """Get total news count and avg importance for a date range."""
+    db = get_db()
+    cur = db.execute(
+        "SELECT COUNT(*) as total, AVG(importance) as avg_imp "
+        "FROM news_index WHERE date BETWEEN ? AND ?",
+        (date_from, date_to),
+    )
+    row = cur.fetchone()
+    if db.type == "sqlite":
+        total, avg_imp = row["total"], row["avg_imp"] or 0
+    else:
+        total, avg_imp = row[0], row[1] or 0
+    return {
+        "total": int(total),
+        "avg_importance": round(float(avg_imp), 2),
+    }

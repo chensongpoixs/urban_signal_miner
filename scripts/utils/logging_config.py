@@ -47,4 +47,15 @@ def setup_logging(name: str, logfile: str, level: int = logging.INFO) -> logging
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
+    # ── Always ensure api.llm logger has handlers for LLM request/response logging ──
+    llm_logger = logging.getLogger("api.llm")
+    if not llm_logger.handlers:
+        llm_logger.setLevel(logging.DEBUG)
+        llm_logger.addHandler(console)
+        llm_file = logging.FileHandler(
+            LOG_DIR / "llm_calls.log", encoding="utf-8"
+        )
+        llm_file.setFormatter(formatter)
+        llm_logger.addHandler(llm_file)
+
     return logger

@@ -1,59 +1,47 @@
-# 全局配置
-project:
-  name: "daily_news_analysis"
-  news_dir: "news-corpus"          # ModelScope 仓库本地路径
-  logs_dir: "logs"
-
-# AI 模型配置
-model:
-  - name: "Local-Fast"           # Fast model for classify/simple tasks
-    role: "fast"                 # Used by: classify.py, gen_weekly, gen_monthly, phase1
-    base_url: "http://192.168.3.2:11434"
-    base_url_anthropic: "http://192.168.3.2:11434"
-    api_key: ""                  # Empty = read from ANTHROPIC_API_KEY env var
-    model: "gemma-4-26B-A4B-it-Q4_K_M"
-    timeout: 15000
-    max_retries: 1
-
-  - name: "Local-Deep"           # Deep model for quarterly/deep analysis
-    role: "deep"                 # Used by: gen_quarterly phase2, gen_causal_chain
-    base_url: "http://192.168.3.2:11434"
-    base_url_anthropic: "http://192.168.3.2:11434"
-    api_key: ""
-    model: "gemma-4-26B-A4B-it-Q4_K_M"
-    timeout: 30000
-    max_retries: 1
-
-# 报告生成 token 限制
-llm_limits:
-  classify_max_tokens: 1024      # classify.py 结构化输出（JSON 通常 < 500 tokens）
-  classify_batch_size: 30        # 每批处理新闻数
-  classify_interval_seconds: 0   # API 调用间隔（秒），本地模型设为0
-  classify_body_chars: 2000      # 正文截断字符数（减少输入可提速）
-  classify_workers: 4            # 并发 worker 数（I/O 密集，可设大）
-  weekly_max_tokens: 4096        # 周报
-  monthly_max_tokens: 8192       # 月报
-  quarterly_max_tokens: 8192     # 季度深度报告
-  special_max_tokens: 4096       # 专题分析（城市对比/因果链）
-
-# 去重配置
-dedup:
-  title_similarity_threshold: 0.8  # 标题相似度超过此值视为重复
-
-# 数据库配置 — 二选一: sqlite 或 mysql
-database:
-  type: "mysql"  # sqlite | mysql
-  sqlite:
-    path: "db/news.db"
-  mysql:
-    host: "localhost"
-    port: 3306
-    user: "root"
-    password: ""          # 留空则从环境变量 MYSQL_PASSWORD 读取
-    database: "daily_news"
-    charset: "utf8mb4"
-
-# 每日预估
 daily:
+  processed: 150
   total_files: 600
-  processed: 150  # 经过去重和过滤后的实际打标数
+database:
+  mysql:
+    charset: utf8mb4
+    database: daily_news
+    host: localhost
+    password: ''
+    port: 3306
+    user: root
+  sqlite:
+    path: db/news.db
+  type: mysql
+dedup:
+  title_similarity_threshold: 0.8
+llm_limits:
+  classify_batch_size: 30
+  classify_body_chars: 2000
+  classify_interval_seconds: 0
+  classify_max_tokens: 1024
+  classify_workers: 4
+  monthly_max_tokens: 8192
+  quarterly_max_tokens: 8192
+  special_max_tokens: 4096
+  weekly_max_tokens: 4096
+model:
+- api_key: ''
+  base_url: http://192.168.3.2:11434
+  base_url_anthropic: http://192.168.3.2:11434
+  max_retries: 1
+  model: gemma-4-26B-A4B-it-Q4_K_M
+  name: Local-Fast
+  role: fast
+  timeout: 15000
+- api_key: ''
+  base_url: http://192.168.3.2:11434
+  base_url_anthropic: http://192.168.3.2:11434
+  max_retries: 1
+  model: gemma-4-26B-A4B-it-Q4_K_M
+  name: Local-Deep
+  role: deep
+  timeout: 30000
+project:
+  logs_dir: logs
+  name: daily_news_analysis
+  news_dir: news-corpus

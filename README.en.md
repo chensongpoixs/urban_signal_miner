@@ -1,28 +1,74 @@
 # Urban Signal Miner
 
-**城市信号挖掘系统** — 11源新闻聚合 × AI增强 × 多维分析 × 机会发现
+**Urban Signal Miner** — 11-source news aggregation × AI enrichment × multi-dimensional analysis × opportunity discovery
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
+[![Vue](https://img.shields.io/badge/vue-3.5%2B-brightgreen)](https://vuejs.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> A production-grade news intelligence pipeline that ingests 11 Chinese news platforms daily, enriches each article with AI-generated metadata (domain classification, entity extraction, importance scoring, causal impact assessment), stores into a dual-backend database (SQLite/MySQL with full-text search), and produces multi-tier analytical reports — from weekly trend briefings to quarterly deep-dive causal chain atlases.
+> An enterprise-grade news intelligence pipeline: ingests 11 Chinese news platforms daily, enriches each article with AI-generated metadata (domain classification, entity extraction, importance scoring, causal impact assessment), stores into a dual-backend database (SQLite/MySQL with full-text search), and provides a Web Dashboard with visual analytics, multi-dimensional news search, and multi-tier analytical reports (weekly/monthly/quarterly deep dives with causal chains + opportunity maps + city comparison).
 
 ---
 
-## TL;DR
+## Quick Start
+
+### Web Application (Recommended)
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Start the backend API (default: http://localhost:8000)
+export ANTHROPIC_API_KEY="sk-ant-..."
+uvicorn api.main:app --reload --port 8000
+
+# 3. Start the frontend dev server (default: http://localhost:5173)
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser.
+
+### CLI Mode
 
 ```bash
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY="sk-ant-..."
 
 python run_pipeline.py                          # Full pipeline: sync → classify → index → report
-python scripts/search.py -k "AI芯片" -c 深圳 -i 4  # Search with multi-dimension filters
-python scripts/gen_quarterly.py --offset -1      # Deep quarterly report (Opus-level analysis)
+python scripts/search.py -k "AI chips" -c Shenzhen -i 4  # Multi-dimension search
+python scripts/gen_quarterly.py --offset -1      # Previous quarter deep analysis
 ```
 
 **Input**: 600–900 raw Markdown articles/day from 11 platforms  
-**Output**: Classified news index + weekly/monthly/quarterly reports with causal chains, trend signals, city competitiveness, and opportunity maps  
+**Output**: Classified news index + Dashboard visualization + weekly/monthly/quarterly reports  
 **Cost**: ~$15–25/month (local LLM: nearly zero)
+
+---
+
+## Web Features
+
+| Page | Route | Description |
+|------|-------|-------------|
+| **Dashboard** | `/dashboard` | 4 stat cards + news volume line chart + domain pie chart + city/source bar charts + recent reports |
+| **News Search** | `/news` | Left filter panel (keyword/domain/city/source/importance/date) + results list + detail drawer |
+| **Report Center** | `/reports` | Tab bar by report type + card gallery + generate dialog (type/period/force regenerate) + progress polling |
+| **Report Detail** | `/reports/:type/:key` | Sticky section nav + structured rendering (key findings/causal chain/opportunity table/ranked list) + raw markdown toggle + regenerate/delete |
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/dashboard/stats?days=30` | Dashboard aggregate data |
+| GET | `/api/v1/news/search?keyword=&domain=&city=&...` | Multi-dimension news search |
+| GET | `/api/v1/news/{id}` | News detail |
+| GET | `/api/v1/reports?report_type=&page=&page_size=` | Report list |
+| GET | `/api/v1/reports/{type}/{period_key}` | Report detail (structured JSON) |
+| POST | `/api/v1/reports/generate` | Trigger generation (async, returns task_id) |
+| DELETE | `/api/v1/reports/{type}/{period_key}` | Delete report |
+| GET | `/api/v1/tasks/{task_id}` | Poll task status |
+| GET | `/api/v1/meta/{domains,cities,sources,report-types,available-periods}` | Metadata |
 
 ---
 
@@ -54,23 +100,18 @@ python scripts/gen_quarterly.py --offset -1      # Deep quarterly report (Opus-l
 │              SQLite ←──── config switch ────▶ MySQL                 │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    ANALYSIS & REPORTING                             │
-│                                                                     │
-│  ┌──────────┐    ┌──────────┐    ┌──────────────────────────────┐  │
-│  │  Weekly  │───▶│  Monthly │───▶│         Quarterly             │  │
-│  │  (fast)  │    │  (fast)  │    │  Phase1: domain summary (fast)│  │
-│  │  TOP10   │    │  trend   │    │  Phase2: deep causal (deep)   │  │
-│  │  signals │    │  confirm  │    │  6-module atlas report       │  │
-│  └──────────┘    └──────────┘    └──────────────────────────────┘  │
-│                                                                     │
-│  ┌────────────────────┐  ┌──────────────────────────────────────┐  │
-│  │  City Comparison   │  │        Causal Chain Tracker           │  │
-│  │  6-city radar      │  │  upstream causes → downstream impacts │  │
-│  │  talent/capital flow│  │  confidence-annotated link graph     │  │
-│  └────────────────────┘  └──────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+               ┌────────────────┼────────────────┐
+               ▼                                 ▼
+┌──────────────────────────┐    ┌──────────────────────────────────┐
+│      FastAPI Backend      │    │        Vue 3 Frontend            │
+│  ┌────────────────────┐  │    │  ┌────────────────────────────┐  │
+│  │ DashboardService   │  │    │  │ DashboardView (ECharts)    │  │
+│  │ ReportService      │  │    │  │ NewsSearchView (Filter+)   │  │
+│  │ MarkdownParser     │  │    │  │ ReportCenterView (Gallery) │  │
+│  │ ThreadPoolExecutor │  │    │  │ ReportDetailView (Struct)  │  │
+│  └────────────────────┘  │    │  │ MainLayout (Dark Theme)    │  │
+└──────────────────────────┘    │  └────────────────────────────┘  │
+                                └──────────────────────────────────┘
 ```
 
 ### Key Design Decisions
@@ -79,9 +120,10 @@ python scripts/gen_quarterly.py --offset -1      # Deep quarterly report (Opus-l
 |----------|-----------|
 | **YAML frontmatter injection** (not separate metadata files) | Non-destructive: original Markdown preserved; metadata travels with content; single source of truth |
 | **Dual database backend** (SQLite ↔ MySQL) | Zero-config SQLite for personal use; MySQL for multi-process/concurrent access; identical API via `db.py` |
-| **Two-phase quarterly analysis** | Fast model compresses 300+ articles into domain summaries; deep model reasons over compressed context — avoids token limits without losing signal |
-| **Multi-model routing** | `model_key="fast"` for classify/weekly/monthly; `model_key="deep"` for quarterly/causal-chain — both configured in `settings.yaml` with role tags |
-| **Crash recovery via `processed_files`** | Every file is marked processed immediately after API call (pass or skip). On restart, already-processed files are skipped — no duplicate API cost |
+| **Async report generation with polling** | POST returns task_id immediately; ThreadPoolExecutor generates in background; frontend polls every 2s; auto-navigates on completion |
+| **Markdown → Structured JSON** | Backend parses report Markdown into section arrays; frontend renders by type (causal chain diagrams, opportunity tables, ranked lists) |
+| **Multi-model routing** | `model_key="fast"` for classify/weekly/monthly; `model_key="deep"` for quarterly/causal-chain — configured in `settings.yaml` with role tags |
+| **Crash recovery via `processed_files`** | Files marked processed immediately after API call; restart skips already-processed files — no duplicate API cost |
 
 ---
 
@@ -91,7 +133,7 @@ python scripts/gen_quarterly.py --offset -1      # Deep quarterly report (Opus-l
 
 | Tier | Source Key | Platform | Coverage Strategy | Weight |
 |------|-----------|----------|-------------------|--------|
-| **P1** | `cls-hot` | 财联社电报 | Full corpus — financial wires with highest signal density | 5 |
+| **P1** | `cls-hot` | 财联社电报 | Full corpus — financial wires, highest signal density | 5 |
 | **P1** | `wallstreetcn-hot` | 华尔街见闻 | Full corpus — macro/finance deep dives | 5 |
 | **P1** | `thepaper` | 澎湃新闻 | Full corpus — policy/social investigative reporting | 4 |
 | **P2** | `toutiao` | 今日头条 | AI-filtered — broad coverage, high noise floor | 3 |
@@ -163,8 +205,8 @@ Two modes:
 |--------|------|-------|-------------|
 | `id` | VARCHAR(64) PK | PRIMARY | `{YYYYMMDD}-{source}-{rank}` |
 | `date` | DATE | ✓ | Publication date |
-| `source` | VARCHAR(32) | ✓ | Source key (e.g. `cls-hot`) |
-| `source_name` | VARCHAR(64) | | Display name (e.g. `财联社电报`) |
+| `source` | VARCHAR(32) | ✓ | Source key |
+| `source_name` | VARCHAR(64) | | Display name |
 | `title` | VARCHAR(512) | FULLTEXT | Article headline |
 | `domain` | JSON | | Multi-select domain classification |
 | `cities` | JSON | | Multi-select city association |
@@ -204,7 +246,7 @@ Two modes:
  WEEKLY (every Sunday)          MONTHLY (1st of month)         QUARTERLY (start of quarter)
  ─────────────────────          ──────────────────────         ────────────────────────────
  Model: fast                    Model: fast                    Model: Phase1=fast + Phase2=deep
-                                                                
+
  ✓ TOP 10 events                ✓ Trend confirmation          ✓ Core narrative arcs (3–5)
  ✓ Domain dynamics (4 sectors)  ✓ Cross-domain causal links   ✓ Causal chain atlas (5+ chains)
  ✓ Trend signals                ✓ City monthly comparison     ✓ Underlying mechanisms (5+ laws)
@@ -221,20 +263,9 @@ Two modes:
  Causal Chain: upstream cause trace + downstream impact prediction + counterfactual reasoning
 ```
 
-### Quarterly Deep Report Modules
-
-| # | Module | Methodology |
-|---|--------|-------------|
-| 1 | **Core Narratives** | Synthesize quarter's events into 3–5 thematic storylines |
-| 2 | **Causal Chain Atlas** | Event A → B → C with derivation logic, evidence (specific headlines + dates), uncertainty annotation |
-| 3 | **Underlying Mechanisms** | Extract recurring socio-economic-political patterns from news, each backed by ≥3 specific events, with boundary conditions and actionable insights |
-| 4 | **Trend Forecast** | Accelerating trends, decelerating trends, potential inflection points for next quarter |
-| 5 | **City Competition** | 6-city radar on policy intensity, capital activity, talent attraction, industrial base, innovation vitality — with flow inference from actual news |
-| 6 | **Opportunity Map** | Investment/career/business opportunities with confidence level and time window |
-
 ---
 
-## Command Reference
+## CLI Command Reference
 
 ### Pipeline Orchestrator
 
@@ -246,39 +277,13 @@ python run_pipeline.py --skip-report            # Skip report generation
 python run_pipeline.py --skip-sync              # Skip git pull
 ```
 
-### Individual Steps
-
-```bash
-# Data sync
-python scripts/sync_news.py                     # git pull from ModelScope
-
-# AI classification
-python scripts/classify.py --dry-run            # Preview mode (no changes)
-python scripts/classify.py --limit 10           # Process only 10 articles (testing)
-python scripts/classify.py                      # Process all pending
-python scripts/classify.py --files file1.md file2.md  # Specific files only
-
-# Index sync
-python scripts/index_sync.py                    # Full rebuild
-python scripts/index_sync.py --incremental      # Only new files
-
-# Configuration check
-python scripts/config_validate.py               # Pre-flight validation
-```
-
 ### Search
 
 ```bash
-# Full-text search with multi-dimension filters
-python scripts/search.py -k "自动驾驶"                          # Keyword
-python scripts/search.py -k "半导体" -c 上海 -i 4                # City + importance
-python scripts/search.py -d "经济/金融" --from 2026-04-01        # Domain + date range
-python scripts/search.py -k "AI" -s cls-hot -n 50                # Source + limit
-
-# Output formats
-python scripts/search.py -k "芯片" --format json                  # JSON output
-python scripts/search.py -k "芯片" --format csv -o results.csv    # CSV export
-python scripts/search.py -k "芯片" --count                        # Count only
+python scripts/search.py -k "autonomous driving"                        # Keyword
+python scripts/search.py -k "semiconductor" -c Shanghai -i 4             # City + importance
+python scripts/search.py -d "经济/金融" --from 2026-04-01                # Domain + date range
+python scripts/search.py -k "AI" -s cls-hot -n 50                        # Source + limit
 ```
 
 ### Report Generation
@@ -288,15 +293,14 @@ python scripts/search.py -k "芯片" --count                        # Count only
 python scripts/gen_weekly.py                     # Current week
 python scripts/gen_weekly.py --week 2026-W15     # Historical week
 python scripts/gen_monthly.py                    # Current month
-python scripts/gen_monthly.py --month 2026-03    # Historical month
 python scripts/gen_quarterly.py                  # Current quarter
 python scripts/gen_quarterly.py --offset -1      # Previous quarter
 
 # Special reports
-python scripts/gen_city_compare.py               # 6-city comparison (last 3 months)
+python scripts/gen_city_compare.py               # 6-city comparison
 python scripts/gen_city_compare.py --months 6    # Extended time window
-python scripts/gen_causal_chain.py --topic "AI芯片"              # Causal chain tracking
-python scripts/gen_causal_chain.py --topic "房价" --months 12     # Year-long trace
+python scripts/gen_causal_chain.py --topic "AI chips"                  # Causal chain tracking
+python scripts/gen_causal_chain.py --topic "housing" --months 12       # Year-long trace
 ```
 
 ---
@@ -306,79 +310,86 @@ python scripts/gen_causal_chain.py --topic "房价" --months 12     # Year-long 
 ### `config/settings.yaml` — Global settings
 
 ```yaml
-project:
-  news_dir: "news-corpus"
-
-model:
-  - name: "Local-Fast"
-    role: "fast"                      # Used by: classify, weekly, monthly, quarterly-phase1
-    base_url_anthropic: "http://localhost:11434"
-    api_key: ""                       # Empty = read from ANTHROPIC_API_KEY env
-    model: "gemma-4-26B-it-Q4_K_M"
-    timeout: 15000
-    max_retries: 1
-
-  - name: "Local-Deep"
-    role: "deep"                      # Used by: quarterly-phase2, causal-chain
-    base_url_anthropic: "http://localhost:11434"
-    api_key: ""
-    model: "gemma-4-26B-it-Q4_K_M"
-    timeout: 30000
-    max_retries: 1
-
-llm_limits:
-  classify_max_tokens: 2048
-  classify_batch_size: 30            # Articles per batch
-  classify_interval_seconds: 1       # Rate limiting between API calls
-  classify_body_chars: 3000          # Article body truncation
-  weekly_max_tokens: 4096
-  monthly_max_tokens: 8192
-  quarterly_max_tokens: 8192
-  special_max_tokens: 4096
-
-dedup:
-  title_similarity_threshold: 0.8    # difflib threshold for pre-LLM dedup
-
 database:
-  type: "sqlite"                     # sqlite | mysql
+  type: "sqlite"                   # sqlite | mysql
   sqlite:
     path: "db/news.db"
   mysql:
     host: "localhost"
     port: 3306
     user: "root"
-    password: ""                     # Empty = read from MYSQL_PASSWORD env
+    password: ""                   # Empty = read from MYSQL_PASSWORD env
     database: "daily_news"
     charset: "utf8mb4"
+
+model:
+  - name: "Local-Fast"
+    role: "fast"                    # Used by: classify, weekly, monthly, quarterly-phase1
+    base_url_anthropic: "http://localhost:11434"
+    api_key: ""                     # Empty = read from ANTHROPIC_API_KEY env
+    model: "gemma-4-26B-it-Q4_K_M"
+    timeout: 15000
+    max_retries: 1
+
+  - name: "Local-Deep"
+    role: "deep"                    # Used by: quarterly-phase2, causal-chain
+    base_url_anthropic: "http://localhost:11434"
+    api_key: ""
+    model: "gemma-4-26B-it-Q4_K_M"
+    timeout: 30000
+    max_retries: 1
 ```
 
-### `config/cities.yaml`
+---
 
-Each of the 6 cities defines `keywords` (place names + institution names for pre-filtering) and `focus_areas` (domain-specific tracking priorities). The keyword list is used by `classify.py` for pre-LLM city matching to reduce API costs.
+## Project Structure
 
-### `config/domains.yaml`
-
-4 top-level domains (科技/AI, 经济/金融, 政治/国际关系, 社会/民生) with sub-domains and keyword indicators for classification.
-
-### `config/source_weight.yaml`
-
-11 sources with `weight` (1–5), `full_process` flag (true = full corpus, false = selective), and `top_only` flag (true = top-20 only).
+```
+daily/
+├── api/                        # FastAPI backend
+│   ├── main.py                 # App entry, CORS, lifespan
+│   ├── config.py               # Settings loader
+│   ├── dependencies.py         # DB dependency injection
+│   ├── models/                 # Pydantic models
+│   ├── routers/                # dashboard, news, reports, meta
+│   └── services/               # report_service, markdown_parser, dashboard_service
+├── frontend/                   # Vue 3 frontend
+│   ├── src/
+│   │   ├── views/              # Dashboard, NewsSearch, ReportCenter, ReportDetail
+│   │   ├── stores/             # Pinia stores (dashboard, news, reports)
+│   │   ├── api/                # Axios API client
+│   │   ├── router/             # Vue Router config
+│   │   ├── layouts/            # MainLayout (dark theme + collapsible sidebar)
+│   │   └── types/              # TypeScript type definitions
+│   └── vite.config.ts          # Vite build config + API proxy
+├── scripts/                    # Python CLI tools (existing)
+│   ├── classify.py             # AI enhancement (core pipeline)
+│   ├── search.py               # CLI search
+│   ├── gen_weekly.py           # Weekly report
+│   ├── gen_monthly.py          # Monthly report
+│   ├── gen_quarterly.py        # Quarterly deep report (2-phase)
+│   ├── gen_city_compare.py     # City comparison
+│   ├── gen_causal_chain.py     # Causal chain tracker
+│   └── utils/                  # db.py, llm_client.py, config_loader.py, etc.
+├── config/                     # YAML configuration files
+├── reports/                    # Generated report Markdown files
+├── db/                         # SQLite database
+├── logs/                       # Runtime logs
+└── run_pipeline.py             # One-click pipeline orchestrator
+```
 
 ---
 
 ## Deployment
 
-### Local (Personal Use)
+### Local Development
 
 ```bash
-# Prerequisites
-pip install -r requirements.txt
+# Terminal 1: Backend
+uvicorn api.main:app --reload --port 8000
 
-# Clone news corpus
-git clone https://www.modelscope.cn/datasets/chensongpoixs/daily_news_corpus.git news-corpus
-
-# Run pipeline
-python run_pipeline.py
+# Terminal 2: Frontend
+cd frontend && npm run dev
 ```
 
 ### Cron (Automated Daily)
@@ -394,61 +405,17 @@ python run_pipeline.py
 0 10 1 * * cd /path/to/daily && python scripts/gen_monthly.py >> logs/cron.log 2>&1
 ```
 
-### Production Considerations
+### Production
 
-- **Database**: Use MySQL for concurrent access; the dual-backend architecture makes the switch transparent
-- **LLM Endpoint**: Configure `role: "fast"` and `role: "deep"` models separately. For production, use Anthropic API for `deep` and a local/cheaper endpoint for `fast`
-- **Logging**: All logs use `RotatingFileHandler` (10MB × 5 backups) under `logs/`
-- **Crash Recovery**: `processed_files` table ensures classify can resume without re-processing. Failed articles are NOT marked as processed, so they retry on next run
-- **Rate Limiting**: `classify_interval_seconds` in settings prevents API throttling
+```bash
+# Backend (with gunicorn)
+pip install gunicorn
+gunicorn api.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 
----
-
-## Development
-
-### Project Structure
-
+# Frontend (static build)
+cd frontend && npm run build
+# Deploy dist/ to Nginx, configure /api reverse proxy to localhost:8000
 ```
-daily/
-├── config/                  # YAML configuration files
-├── news-corpus/             # ModelScope repo (git submodule equivalent)
-├── scripts/
-│   ├── sync_news.py         # Step 1: git pull
-│   ├── classify.py          # Step 2: AI enhancement (core pipeline)
-│   ├── index_sync.py        # Step 3: database sync
-│   ├── search.py            # CLI search tool
-│   ├── gen_weekly.py        # Weekly report
-│   ├── gen_monthly.py       # Monthly report
-│   ├── gen_quarterly.py     # Quarterly deep report (2-phase)
-│   ├── gen_city_compare.py  # City comparison special report
-│   ├── gen_causal_chain.py  # Causal chain special report
-│   ├── config_validate.py   # Pre-flight config check
-│   └── utils/
-│       ├── db.py            # DB abstraction (SQLite/MySQL)
-│       ├── llm_client.py    # LLM API wrapper (Anthropic-compatible)
-│       ├── config_loader.py # YAML config reader
-│       ├── file_utils.py    # File scanning utilities
-│       └── logging_config.py # Unified logging (RotatingFileHandler)
-├── run_pipeline.py          # One-click orchestrator
-├── reports/                 # Generated reports
-│   ├── weekly/
-│   ├── monthly/
-│   ├── quarterly/
-│   └── special/
-├── db/                      # SQLite database (if using SQLite)
-├── logs/                    # Runtime logs (10MB rotation × 5)
-└── docs/                    # Documentation
-```
-
-### Key Design Patterns
-
-**Dual-Backend Database**: `_DB` class initializes either SQLite or MySQL based on `settings.yaml`. All public functions (`insert_news()`, `search_news()`, etc.) work identically regardless of backend. Placeholder conversion (`?` → `%s`) happens automatically in `execute()`.
-
-**Safe LLM Wrapper**: `chat_safe()` catches all exceptions and returns error text instead of crashing — critical for report generators that must produce output even when APIs fail.
-
-**Non-Destructive Enhancement**: `classify.py` prepends YAML frontmatter to original Markdown files. The original content is preserved verbatim below the `---` delimiter. Re-running is safe (files with existing frontmatter are skipped).
-
-**Crash Recovery**: Files are marked in `processed_files` immediately after the API call — whether the article passed quality gates or was skipped. This ensures no duplicate API costs on restart.
 
 ---
 
@@ -456,11 +423,17 @@ daily/
 
 | Package | Purpose |
 |---------|---------|
+| `fastapi` + `uvicorn` | Web API framework |
 | `anthropic` | Claude/Anthropic-compatible API client |
 | `pyyaml` | Configuration file parsing |
-| `pydantic` | Structured output validation for AI classification |
-| `pymysql` | MySQL backend (optional — only if `database.type: mysql`) |
-| `tqdm` | Progress bars for batch classification |
+| `pydantic` | AI classification + API model validation |
+| `pymysql` | MySQL backend (when `database.type: mysql`) |
+| `tqdm` | Batch classification progress bars |
+| `vue` + `vite` | Frontend framework & build tooling |
+| `element-plus` | UI component library |
+| `echarts` | Data visualization charts |
+| `pinia` | Frontend state management |
+| `axios` | HTTP client |
 
 Python 3.10+ required.
 
@@ -469,13 +442,13 @@ Python 3.10+ required.
 ## FAQ
 
 **Q: Can I use a local LLM instead of Claude API?**  
-Yes. Set `base_url_anthropic` to your local endpoint (e.g., Ollama, vLLM, llama.cpp server). The system uses the Anthropic-compatible `/v1/messages` protocol. Configure two model entries with `role: "fast"` and `role: "deep"` for cost optimization.
+Yes. Point `base_url_anthropic` to your local endpoint (Ollama, vLLM, llama.cpp server). The system uses the Anthropic-compatible `/v1/messages` protocol.
 
 **Q: How do I switch between SQLite and MySQL?**  
-Change `database.type` in `config/settings.yaml`. All application code uses the same `db.py` interface — no code changes needed. MySQL tables are auto-created with proper `utf8mb4` charset.
+Change `database.type` in `config/settings.yaml`. All application code uses the same `db.py` interface — no code changes needed.
 
 **Q: What happens if the API fails during classification?**  
-The failed article is NOT marked as processed, so it will be retried on the next pipeline run. All other articles in the batch continue processing. The progress bar shows which files succeeded/failed.
+Failed articles are NOT marked as processed, so they will be retried on the next pipeline run.
 
-**Q: Can I backfill reports for past periods?**  
-Yes. Weekly reports support `--week 2026-W15`, monthly reports support `--month 2026-03`. Quarterly reports use `--offset` (0=current, -1=previous, -2=two quarters ago, etc.).
+**Q: How long does report generation take in the web UI?**  
+Depends on model speed and article count. Weekly reports typically take 30–90 seconds; quarterly deep analysis may take 3–5 minutes. The frontend shows a real-time progress bar with auto-navigation on completion.

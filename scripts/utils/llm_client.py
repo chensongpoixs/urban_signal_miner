@@ -11,6 +11,9 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+# Also log to the dedicated LLM log file
+llm_detail_logger = logging.getLogger("api.llm")
+
 SETTINGS_PATH = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
 
 
@@ -79,6 +82,51 @@ def _get_text_from_response(response) -> str:
     raise ValueError("No TextBlock found in response")
 
 
+def _log_llm_request(
+    call_type: str,
+    model: str,
+    system: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+):
+    """Log full LLM request details."""
+    detail = (
+        f"\n{'='*80}\n"
+        f"LLM REQUEST [{call_type}] | model={model} | max_tokens={max_tokens} | temperature={temperature}\n"
+        f"{'='*80}\n"
+        f"--- SYSTEM PROMPT ---\n{system}\n"
+        f"--- MESSAGES ---\n"
+    )
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        detail += f"  [{i}] role={role}\n{content}\n"
+    detail += f"{'='*80}\n"
+    llm_detail_logger.info(detail)
+
+
+def _log_llm_response(
+    call_type: str,
+    model: str,
+    response_text: str,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: float,
+    attempt: int = 1,
+):
+    """Log full LLM response details."""
+    detail = (
+        f"\n{'='*80}\n"
+        f"LLM RESPONSE [{call_type}] | model={model} | attempt={attempt} | "
+        f"input_tokens={input_tokens} | output_tokens={output_tokens} | latency={latency_ms:.0f}ms\n"
+        f"{'='*80}\n"
+        f"{response_text}\n"
+        f"{'='*80}\n"
+    )
+    llm_detail_logger.info(detail)
+
+
 def chat(
     system: str,
     messages: List[Dict[str, str]],
@@ -98,6 +146,9 @@ def chat(
     model = model or _get_model_name(model_key)
     max_retries = _get_max_retries(model_key)
 
+    # ── Log request ──
+    _log_llm_request("CHAT", model, system, messages, max_tokens, temperature)
+
     api_kwargs: Dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
@@ -108,17 +159,28 @@ def chat(
 
     for attempt in range(max_retries):
         try:
+            t0 = time.perf_counter()
             response = client.messages.create(**api_kwargs)
+            latency = (time.perf_counter() - t0) * 1000
+            text = _get_text_from_response(response)
+
             logger.info(
-                "API call success | model=%s | input_tokens=%s | output_tokens=%s",
-                model,
-                response.usage.input_tokens,
-                response.usage.output_tokens,
+                "API call success | model=%s | input_tokens=%s | output_tokens=%s | latency=%.0fms",
+                model, response.usage.input_tokens, response.usage.output_tokens, latency,
             )
-            return _get_text_from_response(response)
+
+            # ── Log full response ──
+            _log_llm_response(
+                "CHAT", model, text,
+                response.usage.input_tokens, response.usage.output_tokens,
+                latency, attempt + 1,
+            )
+
+            return text
         except Exception as e:
             wait = 2 ** attempt
             logger.warning("API call failed (attempt %d/%d): %s, retry in %ds", attempt + 1, max_retries, e, wait)
+            llm_detail_logger.error("LLM call failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
             if attempt < max_retries - 1:
                 time.sleep(wait)
             else:
@@ -144,8 +206,13 @@ def chat_structured(
     model = model or _get_model_name(model_key)
     max_retries = _get_max_retries(model_key)
 
+    # ── Log request ──
+    messages = [{"role": "user", "content": prompt}]
+    _log_llm_request("STRUCTURED", model, system, messages, 2048, temperature)
+
     for attempt in range(max_retries):
         try:
+            t0 = time.perf_counter()
             response = client.messages.create(
                 model=model,
                 max_tokens=2048,
@@ -153,7 +220,16 @@ def chat_structured(
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
+            latency = (time.perf_counter() - t0) * 1000
             text = _get_text_from_response(response)
+
+            # ── Log raw response before JSON parsing ──
+            _log_llm_response(
+                "STRUCTURED", model, text,
+                response.usage.input_tokens, response.usage.output_tokens,
+                latency, attempt + 1,
+            )
+
             json_str = _extract_json(text)
 
             # Apply normalizer to fix common LLM output format issues
@@ -166,13 +242,16 @@ def chat_structured(
                     pass  # If parsing fails, let Pydantic report the error
 
             logger.info(
-                "Structured output success | model=%s | tokens=%s",
-                model, response.usage.output_tokens,
+                "Structured output success | model=%s | tokens=%s | latency=%.0fms",
+                model, response.usage.output_tokens, latency,
             )
-            return output_schema.model_validate_json(json_str)
+            result = output_schema.model_validate_json(json_str)
+            llm_detail_logger.info("Structured output parsed OK | schema=%s", output_schema.__name__)
+            return result
         except Exception as e:
             wait = 2 ** attempt
             logger.warning("Structured output failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
+            llm_detail_logger.error("Structured output failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
             if attempt < max_retries - 1:
                 time.sleep(wait)
             else:
@@ -197,6 +276,7 @@ def chat_safe(system: str, messages: list, model: str = None, model_key=None, ma
         return chat(system, messages, model=model, model_key=model_key, max_tokens=max_tokens, temperature=temperature)
     except Exception as e:
         logger.error("LLM call ultimately failed: %s", e)
+        llm_detail_logger.error("LLM call ultimately failed: %s", e)
         return f"\n\n> [Report generation failed: {e}]"
 
 
